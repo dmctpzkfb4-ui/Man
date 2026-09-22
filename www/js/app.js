@@ -7,8 +7,8 @@
 (function () {
   'use strict';
 
-  var FASSUNG = "2.3";
-  var STAND = "2026-09-22 18:25";
+  var FASSUNG = "2.4";
+  var STAND = "2026-09-22 22:25";
 
   var $ = function (id) { return document.getElementById(id); };
   /* Leistungsstufen. Gemessen auf vier CPU-Kernen gegen ein Referenzbild:
@@ -281,6 +281,8 @@
     $('grabBtn').disabled = false;
     $('stopSrcBtn').disabled = false;
     S.running = true;
+    starteVerfolgung();
+    tickerLebt(true);
     log('kamera', 'Kamera gestartet', v.videoWidth + '×' + v.videoHeight + ' · ' +
       (S.facing === 'environment' ? 'Rückkamera' : 'Frontkamera'));
     schleife();
@@ -445,6 +447,23 @@
         var roh = await window.Detector.detect(quelle, { conf: S.conf, iou: S.iou, maxDet: 60 });
         var hits = filtere(roh);
         S.lastHits = hits;
+
+        // Verfolgung: macht aus Einzelbild-Treffern durchgehende Objekte.
+        var verfolgt = { aktiv: [], neu: [], verloren: [] };
+        if (tracker) {
+          verfolgt = tracker.schritt(hits, Date.now());
+          verfolgt.neu.forEach(function (sp) {
+            ereignis('erschienen', sp.label + ' erschienen (#' + sp.id + ')',
+              Math.round(sp.bestScore * 100) + ' %');
+          });
+          verfolgt.verloren.forEach(function (sp) {
+            ereignis('verschwunden', sp.label + ' verschwunden (#' + sp.id + ')',
+              ((sp.zuletzt - sp.zuerst) / 1000).toFixed(1) + ' s im Bild');
+          });
+          renderSpuren(verfolgt.aktiv);
+        }
+        aufnahmeSchritt(quelle, verfolgt.aktiv);
+
         zeichne(hits);
         renderHits(hits);
         var st = window.Detector.stats;
@@ -544,6 +563,7 @@
     $('stopSrcBtn').disabled = false;
     $('flipBtn').disabled = true;
     S.running = true;
+    starteVerfolgung();
     tickerLebt(true);
     ticker('Bildschirmaufnahme läuft', null, true);
     schleife();
@@ -596,7 +616,9 @@
   }
 
   function stoppeQuelle() {
+    if (rec.laeuft) beendeAufnahme();
     S.running = false;
+    $('recBtn').disabled = true;
     tickerLebt(false);
     ticker('Quelle beendet', null, true);
     msVerlauf = [];
@@ -1776,6 +1798,268 @@
     }
   }
 
+  /* ================================================== Aufnahme und Spuren
+   *
+   * Aufgenommen wird eine eigene Leinwand, auf die je Bild Quelle UND
+   * Rahmen gezeichnet werden. Das Videoelement direkt aufzunehmen waere
+   * billiger, wuerde aber genau das weglassen, worum es geht: was die
+   * Erkennung gesehen hat. Die Leinwand entsteht nur waehrend der Aufnahme.
+   * ====================================================================== */
+
+  var tracker = null;
+  var rec = {
+    recorder: null, teile: [], laeuft: false, wartet: false,
+    start: 0, dauer: 0, uhr: null, canvas: null, ctx: null,
+    strom: null, ereignisse: [], blob: null, ausloeser: false,
+    letzteAktivitaet: 0
+  };
+
+  function mimeWaehlen() {
+    var kandidaten = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+    for (var i = 0; i < kandidaten.length; i++) {
+      if (window.MediaRecorder && MediaRecorder.isTypeSupported(kandidaten[i])) return kandidaten[i];
+    }
+    return '';
+  }
+
+  function zeitText(ms) {
+    var s2 = Math.floor(ms / 1000);
+    return Math.floor(s2 / 60) + ':' + String(s2 % 60).padStart(2, '0');
+  }
+
+  /** Zeichnet Quelle und Rahmen in die Aufnahme-Leinwand. */
+  function zeichneAufnahmebild(quelle, spuren) {
+    if (!rec.ctx) return;
+    var c = rec.canvas, g = rec.ctx;
+    g.drawImage(quelle, 0, 0, c.width, c.height);
+
+    var f = c.width / Math.max(1, S.srcW);
+    g.lineWidth = Math.max(2, c.width / 320);
+    g.font = '600 ' + Math.max(11, c.width / 42) + 'px ui-monospace, monospace';
+    g.textBaseline = 'top';
+    spuren.forEach(function (sp) {
+      var farbe = 'hsl(' + ((sp.classId * 47) % 360) + ' 70% 62%)';
+      var x = sp.box.x * f, y = sp.box.y * f, w = sp.box.w * f, h = sp.box.h * f;
+      g.strokeStyle = farbe;
+      g.strokeRect(x, y, w, h);
+      var txt = '#' + sp.id + ' ' + sp.label + ' ' + Math.round(sp.score * 100) + '%';
+      var hh = Math.max(15, c.width / 36);
+      g.fillStyle = farbe;
+      g.fillRect(x, Math.max(0, y - hh), g.measureText(txt).width + 10, hh);
+      g.fillStyle = '#06171E';
+      g.fillText(txt, x + 5, Math.max(0, y - hh) + 2);
+    });
+
+    // Zeitstempel einbrennen - ohne ihn ist eine Aufnahme als Beleg wertlos.
+    var stempel = new Date().toLocaleString('de-DE');
+    g.font = '600 ' + Math.max(10, c.width / 50) + 'px ui-monospace, monospace';
+    var bw = g.measureText(stempel).width + 12;
+    g.fillStyle = 'rgba(7,12,15,.72)';
+    g.fillRect(c.width - bw - 6, c.height - 26, bw, 20);
+    g.fillStyle = '#DEE7EA';
+    g.fillText(stempel, c.width - bw - 1, c.height - 22);
+  }
+
+  function ereignis(art, text, details) {
+    rec.ereignisse.push({
+      ms: rec.laeuft ? Math.round(performance.now() - rec.start) : null,
+      zeit: new Date().toISOString(), art: art, text: text, details: details || null
+    });
+  }
+
+  async function starteAufnahme() {
+    if (rec.laeuft) { beendeAufnahme(); return; }
+    if (!S.running || !S.srcW) { toast('Erst eine Quelle starten.'); return; }
+    if (!window.MediaRecorder) { toast('Diese Umgebung kann nicht aufnehmen.', 4000); return; }
+
+    var mime = mimeWaehlen();
+    if (!mime) { toast('Kein unterstütztes Videoformat gefunden.', 4000); return; }
+
+    // Aufnahmegröße an die Quelle koppeln, aber begrenzen: die Datei waechst
+    // mit der Flaeche, und ein Telefon soll das noch schreiben koennen.
+    var maxB = 960;
+    var f = Math.min(1, maxB / S.srcW);
+    rec.canvas = document.createElement('canvas');
+    rec.canvas.width = Math.round(S.srcW * f / 2) * 2;
+    rec.canvas.height = Math.round(S.srcH * f / 2) * 2;
+    rec.ctx = rec.canvas.getContext('2d');
+
+    rec.strom = rec.canvas.captureStream(0);   // 0 = nur auf Anforderung
+    try {
+      rec.recorder = new MediaRecorder(rec.strom, {
+        mimeType: mime, videoBitsPerSecond: 2500000
+      });
+    } catch (e) { toast('Aufnahme nicht möglich: ' + e.message, 5000); return; }
+
+    rec.teile = []; rec.ereignisse = []; rec.blob = null;
+    rec.recorder.ondataavailable = function (e) { if (e.data && e.data.size) rec.teile.push(e.data); };
+    rec.recorder.onstop = function () {
+      rec.blob = new Blob(rec.teile, { type: mime });
+      // Fuer den Browsertest zugaenglich - sonst laesst sich nicht pruefen,
+      // ob wirklich ein abspielbares Video entstanden ist.
+      window.__recBlob = rec.blob;
+      window.__recEreignisse = rec.ereignisse;
+      $('recSaveBtn').disabled = false;
+      $('recJsonBtn').disabled = false;
+      $('recInfo').textContent = (rec.blob.size / 1048576).toFixed(1).replace('.', ',') + ' MB · ' +
+        rec.ereignisse.length + ' Ereignisse';
+      log('aufnahme', 'Aufnahme beendet',
+        zeitText(rec.dauer) + ' · ' + (rec.blob.size / 1048576).toFixed(1) + ' MB · ' +
+        rec.ereignisse.length + ' Ereignisse · ' +
+        (tracker ? tracker.bilanz().verschiedeneObjekte : 0) + ' verschiedene Objekte');
+    };
+    rec.recorder.onerror = function (e) {
+      toast('Aufnahmefehler: ' + (e.error && e.error.name || 'unbekannt'), 5000);
+      beendeAufnahme();
+    };
+
+    rec.recorder.start(1000);
+    rec.laeuft = true;
+    rec.start = performance.now();
+    rec.dauer = 0;
+    rec.ausloeser = $('recAusloeserBox').classList.contains('on');
+    ereignis('start', 'Aufnahme gestartet',
+      rec.canvas.width + '×' + rec.canvas.height + ' · ' + mime);
+
+    $('recPanel').hidden = false;
+    $('recBtn').textContent = 'Stopp';
+    $('recBtn').classList.remove('btn--danger');
+    $('recBtn').classList.add('btn--primary');
+    $('recPunkt').className = 'rec-punkt laeuft';
+    $('recSaveBtn').disabled = true;
+    $('recJsonBtn').disabled = true;
+    rec.uhr = setInterval(function () {
+      rec.dauer = performance.now() - rec.start;
+      $('recZeit').textContent = zeitText(rec.dauer);
+      $('recNote').textContent = rec.wartet ? 'wartet auf Erkennung' : 'läuft';
+    }, 250);
+    log('aufnahme', 'Aufnahme gestartet',
+      rec.canvas.width + '×' + rec.canvas.height + (rec.ausloeser ? ' · nur bei Erkennung' : ''));
+  }
+
+  function beendeAufnahme() {
+    if (!rec.laeuft) return;
+    rec.laeuft = false;
+    rec.wartet = false;
+    clearInterval(rec.uhr);
+    try { if (rec.recorder && rec.recorder.state !== 'inactive') rec.recorder.stop(); } catch (e) {}
+    try { if (rec.strom) rec.strom.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+    ereignis('stopp', 'Aufnahme beendet', zeitText(rec.dauer));
+    $('recBtn').textContent = 'Aufnahme';
+    $('recBtn').classList.add('btn--danger');
+    $('recBtn').classList.remove('btn--primary');
+    $('recPunkt').className = 'rec-punkt';
+    $('recNote').textContent = 'beendet';
+    // Leinwand freigeben - sie haelt sonst ihren Bildspeicher.
+    setTimeout(function () {
+      if (rec.canvas) { rec.canvas.width = 0; rec.canvas.height = 0; }
+      rec.canvas = null; rec.ctx = null; rec.strom = null;
+    }, 500);
+  }
+
+  /** Je Bild aus der Schleife aufgerufen. */
+  function aufnahmeSchritt(quelle, spuren) {
+    if (!rec.laeuft || !rec.ctx) return;
+    // Auslöser-Betrieb: nur schreiben, solange etwas zu sehen ist. Nach dem
+    // letzten Fund noch zwei Sekunden weiterlaufen, sonst wirkt der Schnitt
+    // abgehackt und der Abgang fehlt.
+    if (rec.ausloeser) {
+      if (spuren.length) rec.letzteAktivitaet = performance.now();
+      var still = performance.now() - rec.letzteAktivitaet > 2000;
+      if (still) {
+        if (!rec.wartet) { rec.wartet = true; $('recPunkt').className = 'rec-punkt wartet'; }
+        return;                      // kein Bild anfordern = keine Aufnahme
+      }
+      if (rec.wartet) { rec.wartet = false; $('recPunkt').className = 'rec-punkt laeuft'; }
+    }
+    zeichneAufnahmebild(quelle, spuren);
+    var spur = rec.strom && rec.strom.getVideoTracks()[0];
+    if (spur && spur.requestFrame) spur.requestFrame();
+  }
+
+  function sichereVideo() {
+    if (!rec.blob) return;
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(rec.blob);
+    a.download = 'aufnahme-' + new Date().toISOString().replace(/[:.]/g, '-') + '.webm';
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 8000);
+    log('aufnahme', 'Video gesichert', a.download);
+  }
+
+  function sichereZeitleiste() {
+    var b = tracker ? tracker.bilanz() : null;
+    var daten = {
+      erzeugtAm: new Date().toISOString(),
+      fassung: FASSUNG,
+      dauerMs: Math.round(rec.dauer),
+      quelle: S.quelle,
+      stufe: S.stufe,
+      aufloesung: rec.canvas ? (rec.canvas.width + '×' + rec.canvas.height) : null,
+      bilanz: b,
+      ereignisse: rec.ereignisse
+    };
+    var bl = new Blob([JSON.stringify(daten, null, 2)], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(bl);
+    a.download = 'zeitleiste-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 8000);
+    log('aufnahme', 'Zeitleiste gesichert', rec.ereignisse.length + ' Ereignisse');
+  }
+
+  function renderSpuren(spuren) {
+    var box = $('spurenListe');
+    if (!tracker) return;
+    var b = tracker.bilanz();
+    $('spurenPanel').hidden = false;
+    $('spurenNote').textContent = b.verschiedeneObjekte +
+      (b.verschiedeneObjekte === 1 ? ' Objekt' : ' Objekte') + ' · ' + b.aktuellImBild + ' im Bild';
+
+    var kennung = spuren.map(function (s2) { return s2.id; }).join(',');
+    if (kennung === box.dataset.k) return;
+    box.dataset.k = kennung;
+    box.textContent = '';
+    if (!spuren.length) {
+      box.innerHTML = '<p class="empty">Nichts im Bild.</p>';
+      return;
+    }
+    spuren.slice().sort(function (a, b2) { return a.id - b2.id; }).forEach(function (sp) {
+      var d = document.createElement('div');
+      d.className = 'spur';
+      d.innerHTML = '<span class="spur-id"></span><span class="spur-name"></span>' +
+        '<span class="spur-score"></span><span class="spur-dauer"></span>';
+      d.querySelector('.spur-id').textContent = '#' + sp.id;
+      d.querySelector('.spur-name').textContent = sp.label;
+      d.querySelector('.spur-score').textContent = Math.round(sp.bestScore * 100) + '%';
+      d.querySelector('.spur-dauer').textContent = ((sp.zuletzt - sp.zuerst) / 1000).toFixed(1).replace('.', ',') + ' s';
+      box.appendChild(d);
+    });
+  }
+
+  function starteVerfolgung() {
+    if (!window.Tracker) return;
+    tracker = new window.Tracker();
+    $('recBtn').disabled = false;
+    $('spurenPanel').hidden = false;
+    $('spurenListe').dataset.k = '';
+    renderSpuren([]);
+  }
+
+  function verdrahteAufnahme() {
+    $('recBtn').addEventListener('click', starteAufnahme);
+    $('recSaveBtn').addEventListener('click', sichereVideo);
+    $('recJsonBtn').addEventListener('click', sichereZeitleiste);
+    $('recAusloeserBox').addEventListener('click', function () {
+      this.classList.toggle('on');
+      rec.ausloeser = this.classList.contains('on');
+      if (rec.laeuft) {
+        rec.letzteAktivitaet = performance.now();
+        if (!rec.ausloeser) { rec.wartet = false; $('recPunkt').className = 'rec-punkt laeuft'; }
+      }
+    });
+  }
+
   /* ============================================================== Start */
 
   function verdrahte() {
@@ -1880,6 +2164,7 @@
 
     verdrahteZoom();
     verdrahteSkripte();
+    verdrahteAufnahme();
     try {
       var gesp = localStorage.getItem('stufe');
       if (gesp && STUFEN[gesp]) S.stufe = gesp;

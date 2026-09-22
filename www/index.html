@@ -82,6 +82,7 @@
         </div>
 
         <div class="btnrow">
+          <button class="btn btn--danger btn--sm" id="recBtn" type="button" disabled>Aufnahme</button>
           <button class="btn btn--ghost btn--sm" id="pauseBtn" type="button" disabled>Pause</button>
           <button class="btn btn--ghost btn--sm" id="flipBtn" type="button" disabled>Kamera wechseln</button>
           <button class="btn btn--ghost btn--sm" id="stopSrcBtn" type="button" disabled>Beenden</button>
@@ -103,6 +104,43 @@
                 <span class="slider-hint">Ab welcher Überdeckung zwei Rahmen als derselbe Fund gelten.</span>
               </label>
             </div>
+          </div>
+        </div>
+
+        <div class="panel" id="recPanel" hidden>
+          <div class="panel-head">
+            <h2 class="panel-title">Aufnahme</h2>
+            <span class="panel-head-note" id="recNote"></span>
+          </div>
+          <div class="panel-body panel-body--tight">
+            <div class="rec-zeile">
+              <span class="rec-punkt" id="recPunkt"></span>
+              <span class="rec-zeit" id="recZeit">0:00</span>
+              <span class="rec-info" id="recInfo"></span>
+            </div>
+            <label class="check" id="recAusloeserBox">
+              <div class="box"></div>
+              <div class="lbl">Nur bei Erkennung aufnehmen
+                <small>Hält an, sobald nichts mehr im Bild ist. Spart Speicherplatz und macht die Aufnahme durchsuchbar.</small>
+              </div>
+            </label>
+            <div class="btnrow" style="margin-top:8px">
+              <button class="btn btn--ghost btn--sm" id="recSaveBtn" type="button" disabled>Video sichern</button>
+              <button class="btn btn--ghost btn--sm" id="recJsonBtn" type="button" disabled>Zeitleiste sichern</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel" id="spurenPanel" hidden>
+          <div class="panel-head">
+            <h2 class="panel-title">Verfolgte Objekte</h2>
+            <span class="panel-head-note" id="spurenNote"></span>
+          </div>
+          <div class="panel-body panel-body--flush">
+            <div id="spurenListe"></div>
+          </div>
+          <div class="panel-body panel-body--tight">
+            <p class="footnote">Gezählt werden <strong>verschiedene</strong> Objekte, nicht Einzelbilder. Verdeckt sich etwas länger, bekommt es danach eine neue Kennung — die Zahl ist eine Obergrenze für tatsächlich verschiedene Dinge.</p>
           </div>
         </div>
 
@@ -358,6 +396,7 @@
      Kernfunktion nicht auf eine Internetverbindung angewiesen sein. -->
 <script src="vendor/ort.wasm.min.js"></script>
 <script src="js/forensics.js"></script>
+<script src="js/tracker.js"></script>
 <script src="js/detector.js"></script>
 <script src="js/skripte.js"></script>
 <script src="js/app.js"></script>

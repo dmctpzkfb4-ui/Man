@@ -45,6 +45,17 @@ Nennen die Metadaten eine Kamera, während die Tabellen aus der
 Standardbibliothek stammen, ist das ein Widerspruch: Die Datei wurde neu
 kodiert, die EXIF-Daten aber übernommen. Die App meldet das ausdrücklich.
 
+**Aufnahme** — nimmt die Live-Ansicht samt eingebrannter Rahmen und
+Zeitstempel als WebM auf. Dazu eine Ereignis-Zeitleiste (wann welches Objekt
+erschien und verschwand) als JSON. Auslöser-Betrieb schreibt nur, solange
+etwas erkannt wird.
+
+**Objektverfolgung** — zählt *verschiedene* Objekte statt Einzelbild-Treffer.
+Verfahren: Überdeckung zwischen aufeinanderfolgenden Bildern, kein
+zusätzliches Modell. Grenzen sind dokumentiert und getestet: längere
+Verdeckung ergibt eine neue Kennung, eng kreuzende gleichartige Objekte
+können die Kennungen tauschen. Die Zahl ist damit eine Obergrenze.
+
 **Skripte** — eigene Rezepte über einen Stapel Bilder laufen lassen. Fünf
 Vorlagen liegen bei: Schnellprüfung, Manipulationsverdacht bewerten, Herkunft
 bestimmen, Dubletten über pHash finden, Objekte zählen.
@@ -145,8 +156,13 @@ Für iOS: `npx cap sync ios`, dann `ios/App/App.xcworkspace` in Xcode öffnen.
 node tools/test-forensics.mjs    # 83 Prüfungen, reine Rechnerei
 node tools/test-detector.mjs     # 16 Prüfungen, Letterbox und NMS
 node tools/test-skripte.mjs      # 19 Prüfungen, Sandkasten und Vertrag
+node tools/test-tracker.mjs      # 18 Prüfungen, Verfolgung samt Grenzen
 PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers \
-  node tools/test-browser.mjs    # 33 Prüfungen im echten Chromium
+  node tools/test-browser.mjs    # 39 Prüfungen im echten Chromium
+PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers \
+  node tools/test-aufnahme.mjs   # 13 Prüfungen, nimmt wirklich auf
+PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers \
+  node tools/test-livelauf.mjs   # Dauerlauf mit Speichermessung
 ```
 
 Die Referenzwerte für Letterbox und Rückrechnung stammen aus einer
