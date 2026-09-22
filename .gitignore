@@ -1,0 +1,25 @@
+# Abhängigkeiten / Build
+node_modules/
+local.properties
+.gradle/
+build/
+DerivedData/
+*.apk
+*.aab
+Pods/
+
+# Signaturschlüssel - niemals ins Repo
+*.keystore
+*.jks
+keystore.properties
+keystore-password.txt
+
+# Zwischenprodukte des Modell-Exports
+*.onnx.tmp
+meinelernkurve.onnx
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+xcuserdata/

@@ -1,0 +1,9 @@
+{
+  "appId": "de.forensikvision.app",
+  "appName": "Forensik Vision",
+  "webDir": "www",
+  "android": { "allowMixedContent": false },
+  "ios": { "contentInset": "never" },
+  "server": { "androidScheme": "https", "iosScheme": "https" },
+  "plugins": { "CapacitorHttp": { "enabled": false } }
+}
