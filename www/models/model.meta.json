@@ -89,12 +89,7 @@
     {
       "datei": "model-256.onnx",
       "imgsz": 256,
-      "zweck": "Live - Stufen Sparsam und Ausgewogen"
-    },
-    {
-      "datei": "model-320.onnx",
-      "imgsz": 320,
-      "zweck": "Live - Stufe Genau"
+      "zweck": "Live - alle drei Stufen"
     },
     {
       "datei": "model.onnx",

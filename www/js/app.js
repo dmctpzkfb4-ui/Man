@@ -40,9 +40,15 @@
                'Empfohlen, wenn die App bisher abgestürzt ist.'
     },
     genau: {
-      name: 'Genau', modell: 'models/model-320.onnx', size: 320,
-      breite: 960, hoehe: 540, takt: 90,
-      hinweis: 'Höchste Trefferqualität und Bildrate. Braucht am meisten Speicher und Rechenzeit.'
+      // Alle drei Stufen teilen sich dasselbe Modell. Das ist die direkte
+      // Folge der Messung: der Speicherbedarf lag bei allen geprueften
+      // Modellvarianten innerhalb von sechs Prozent, waehrend Kamera und
+      // Takt ihn deutlich bewegen. Ein zweites Modell mitzuliefern haette
+      // die Anwendung um zehn Megabyte vergroessert, ohne etwas zu loesen.
+      name: 'Genau', modell: 'models/model-256.onnx', size: 256,
+      breite: 1280, hoehe: 720, takt: 80,
+      hinweis: 'Höchste Bildrate und schärfstes Kamerabild. Braucht am meisten Speicher — ' +
+               'diese Stufe zuletzt versuchen.'
     }
   };
   var STILL_MODEL = { url: 'models/model.onnx', size: 640 };
