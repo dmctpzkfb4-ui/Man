@@ -7,11 +7,44 @@
 (function () {
   'use strict';
 
-  var FASSUNG = "2.2";
-  var STAND = "2026-09-22 04:42";
+  var FASSUNG = "2.3";
+  var STAND = "2026-09-22 18:25";
 
   var $ = function (id) { return document.getElementById(id); };
-  var LIVE_MODEL = { url: 'models/model-320.onnx', size: 320 };
+  /* Leistungsstufen. Gemessen auf vier CPU-Kernen gegen ein Referenzbild:
+   * 192 px braucht 3,7 ms, 256 px 4,9 ms, 320 px 6,9 ms. Bei 192 px faellt
+   * die Erkennungsguete allerdings sichtbar ab (Bus 0,62 statt 0,89) -
+   * darum ist die Stufe als solche gekennzeichnet und nicht die Vorgabe.
+   *
+   * Die Stufe regelt nicht nur das Modell, sondern auch Kameraaufloesung
+   * und Takt. Der Speicherbedarf haengt gemessen VIEL staerker an diesen
+   * beiden als am Modell - ein kleineres Modell allein bringt fast nichts.
+   */
+  var STUFEN = {
+    sparsam: {
+      // Bewusst dasselbe Modell wie "Ausgewogen": gemessen haengt der
+      // Speicherbedarf weit staerker an Kameraaufloesung und Takt als an
+      // der Modellgroesse - alle geprueften Varianten lagen innerhalb von
+      // sechs Prozent. Ein 192er Modell haette die Trefferguete spuerbar
+      // gesenkt (Bus 0,62 statt 0,83), ohne nennenswert Speicher zu sparen.
+      name: 'Sparsam', modell: 'models/model-256.onnx', size: 256,
+      breite: 640, hoehe: 360, takt: 250,
+      hinweis: 'Geringste Last: 4 Bilder je Sekunde, Kamera 640×360. ' +
+               'Gleiche Trefferqualität wie „Ausgewogen“, nur seltener und auf kleinerem Bild — ' +
+               'für Geräte, auf denen die App sonst abstürzt.'
+    },
+    ausgewogen: {
+      name: 'Ausgewogen', modell: 'models/model-256.onnx', size: 256,
+      breite: 854, hoehe: 480, takt: 130,
+      hinweis: 'Rund 30 % weniger Rechenaufwand als „Genau“, bei nahezu gleicher Trefferqualität. ' +
+               'Empfohlen, wenn die App bisher abgestürzt ist.'
+    },
+    genau: {
+      name: 'Genau', modell: 'models/model-320.onnx', size: 320,
+      breite: 960, hoehe: 540, takt: 90,
+      hinweis: 'Höchste Trefferqualität und Bildrate. Braucht am meisten Speicher und Rechenzeit.'
+    }
+  };
   var STILL_MODEL = { url: 'models/model.onnx', size: 640 };
 
   var S = {
@@ -19,6 +52,7 @@
     detectorReady: false, detectorMode: null,
     stream: null, facing: 'environment', running: false, busy: false,
     quelle: 'kamera', srcW: 0, srcH: 0, warPausiert: false, freigabeUhr: null,
+    stufe: 'ausgewogen',
     schirmAktiv: false, schirmNativ: false, schirmBitmap: null,
     conf: 0.25, iou: 0.45,
     fpsWindow: [], lastHits: [],
@@ -176,7 +210,8 @@
   async function initDetector(modus) {
     if (!window.Detector) throw new Error('detector.js wurde nicht geladen.');
     if (!window.ort) throw new Error('ONNX Runtime wurde nicht geladen (CDN nicht erreichbar?).');
-    var m = modus === 'still' ? STILL_MODEL : LIVE_MODEL;
+    var st = STUFEN[S.stufe] || STUFEN.ausgewogen;
+    var m = modus === 'still' ? STILL_MODEL : { url: st.modell, size: st.size };
     var info = await window.Detector.init({
       modelUrl: m.url, labels: S.labels, inputSize: m.size,
       // Alles lokal: kein CDN, kein Netzverkehr waehrend der Analyse.
@@ -197,6 +232,7 @@
   /* ============================================================== Kamera */
 
   async function startKamera() {
+    var stufe = STUFEN[S.stufe] || STUFEN.ausgewogen;
     S.quelle = 'kamera';
     S.schirmNativ = false;
     $('liveStage').classList.remove('quelle-bildschirm');
@@ -211,8 +247,9 @@
       // je Frame zu puffern kostet auf dem Telefon ein Vielfaches an Speicher,
       // ohne einen einzigen Treffer mehr zu bringen.
       S.stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: S.facing, width: { ideal: 960 }, height: { ideal: 540 },
-                 frameRate: { ideal: 24, max: 30 } },
+        video: { facingMode: S.facing,
+                 width: { ideal: stufe.breite }, height: { ideal: stufe.hoehe },
+                 frameRate: { ideal: Math.round(1000 / stufe.takt) + 4, max: 30 } },
         audio: false
       });
     } catch (err) {
@@ -384,13 +421,13 @@
   // Mindestabstand zwischen zwei Erkennungen. Ohne Bremse laeuft die Schleife
   // so schnell wie das Geraet hergibt - das hebt den Dauerbedarf an Speicher
   // und Waerme, ohne dass ein Mensch den Unterschied sieht.
-  var TAKT_MS = 90;
   var letzterLauf = 0;
+  function taktMs() { return (STUFEN[S.stufe] || STUFEN.ausgewogen).takt; }
 
   async function schleife() {
     if (!S.running) return;
     var jetzt = performance.now();
-    if (jetzt - letzterLauf < TAKT_MS) { requestAnimationFrame(schleife); return; }
+    if (jetzt - letzterLauf < taktMs()) { requestAnimationFrame(schleife); return; }
     letzterLauf = jetzt;
     if (S.detectorReady && !S.busy) {
       S.busy = true;
@@ -1691,6 +1728,48 @@
     $('skriptVorlage').value = 'schnell';
   }
 
+  /* ====================================================== Leistungsstufen */
+
+  function baueStufenChips() {
+    var box = $('stufenChips');
+    box.textContent = '';
+    ['sparsam', 'ausgewogen', 'genau'].forEach(function (k) {
+      var st = STUFEN[k];
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chip' + (S.stufe === k ? ' is-on' : '');
+      b.textContent = st.name + ' · ' + st.size + ' px';
+      b.addEventListener('click', function () { setzeStufe(k); });
+      box.appendChild(b);
+    });
+    var st2 = STUFEN[S.stufe] || STUFEN.ausgewogen;
+    $('stufeHinweis').textContent = st2.hinweis;
+    $('stufeNote').textContent = Math.round(1000 / st2.takt) + ' B/s · ' + st2.breite + '×' + st2.hoehe;
+  }
+
+  async function setzeStufe(k) {
+    if (!STUFEN[k] || S.stufe === k) return;
+    S.stufe = k;
+    try { localStorage.setItem('stufe', k); } catch (e) {}
+    baueStufenChips();
+    log('stufe', 'Leistungsstufe: ' + STUFEN[k].name,
+      STUFEN[k].size + ' px · ' + Math.round(1000 / STUFEN[k].takt) + ' Bilder/s · Kamera ' +
+      STUFEN[k].breite + '×' + STUFEN[k].hoehe);
+
+    var liefQuelle = S.running || S.stream;
+    stoppeQuelle();
+    if (S.detectorReady) {
+      try { window.Detector.dispose(); } catch (e) {}
+      S.detectorReady = false; S.detectorMode = null;
+    }
+    try { await initDetector('live'); }
+    catch (e) { log('fehler', 'Modell der neuen Stufe lud nicht', e.message); return; }
+    // Lief gerade etwas, mit der neuen Stufe fortsetzen.
+    if (liefQuelle) {
+      if (S.quelle === 'bildschirm') starteBildschirm(); else startKamera();
+    }
+  }
+
   /* ============================================================== Start */
 
   function verdrahte() {
@@ -1795,6 +1874,11 @@
 
     verdrahteZoom();
     verdrahteSkripte();
+    try {
+      var gesp = localStorage.getItem('stufe');
+      if (gesp && STUFEN[gesp]) S.stufe = gesp;
+    } catch (e) {}
+    baueStufenChips();
 
     $('compareBtn').addEventListener('click', function () { $('compareInput').click(); });
     $('compareInput').addEventListener('change', function () {

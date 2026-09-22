@@ -87,29 +87,46 @@
   },
   "varianten": [
     {
+      "datei": "model-256.onnx",
+      "imgsz": 256,
+      "zweck": "Live - Stufen Sparsam und Ausgewogen"
+    },
+    {
       "datei": "model-320.onnx",
       "imgsz": 320,
-      "ausgabe": [
-        1,
-        84,
-        2100
-      ],
-      "bytes": 9804172,
-      "zweck": "Live-Kamera und Bildschirm - schnell"
+      "zweck": "Live - Stufe Genau"
     },
     {
       "datei": "model.onnx",
       "imgsz": 640,
-      "ausgabe": [
-        1,
-        84,
-        8400
-      ],
-      "bytes": 9930306,
-      "zweck": "Standbild-Analyse - genau"
+      "zweck": "Standbild-Analyse"
     }
   ],
   "eingabeName": "images",
   "nmsEingebaut": false,
-  "hinweis": "Ausgabe [1,84,N] transponiert: 4 Box (xywh, zentriert, Modellraum) + 80 Klassenscores, keine Objectness-Spalte. NMS clientseitig."
+  "hinweis": "Ausgabe [1,84,N] transponiert: 4 Box (xywh, zentriert, Modellraum) + 80 Klassenscores, keine Objectness-Spalte. NMS clientseitig.",
+  "gemessen": {
+    "hinweis": "Auf vier CPU-Kernen, Bild 810x1080, Schwelle 0.4. Der Speicherbedarf im Browser lag bei allen geprueften Modellvarianten innerhalb von sechs Prozent - er haengt an Kamera und Takt, nicht am Modell.",
+    "fp32@192": {
+      "ms": 3.7,
+      "bus": 0.624,
+      "tauglich": false
+    },
+    "fp32@256": {
+      "ms": 4.9,
+      "bus": 0.833,
+      "tauglich": true
+    },
+    "fp32@320": {
+      "ms": 6.9,
+      "bus": 0.89,
+      "tauglich": true
+    },
+    "int8@320": {
+      "ms": 16.2,
+      "bus": 0.849,
+      "tauglich": true,
+      "anmerkung": "2,4-mal langsamer als fp32 - Gewichtsquantisierung muss zur Laufzeit zurueckrechnen"
+    }
+  }
 }
