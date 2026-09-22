@@ -1332,6 +1332,10 @@
    * ========================================================================= */
 
   // Reihenfolge, in der die 64 Werte im DQT-Segment stehen (Zickzack).
+  // Ab welchem Kennwert die Blockraster-Aussage belastbar ist. Siehe
+  // blockingArtifactGrid(): an Testbildern mit bekanntem Beschnitt kalibriert.
+  var GITTER_SCHWELLE = 1.3;
+
   var ZIGZAG = [
      0, 1, 8,16, 9, 2, 3,10, 17,24,32,25,18,11, 4, 5,
     12,19,26,33,40,48,41,34, 27,20,13, 6, 7,14,21,28,
@@ -1574,6 +1578,406 @@
   }
 
   /* =========================================================================
+   * 9d. Blockraster (Blocking Artifact Grid)
+   *
+   * JPEG komprimiert in 8x8-Bloecken. An den Blockgrenzen entstehen feine
+   * Kanten, die im Bild ein regelmaessiges Gitter bilden. Bei einer
+   * unberuehrten Datei sitzt dieses Gitter exakt auf Versatz (0,0).
+   *
+   * Wird ein Bild beschnitten und erneut gespeichert, wandert das alte Gitter
+   * mit - der Versatz ist dann ungleich null. Und wenn ein fremder Bereich in
+   * ein Bild eingesetzt wurde, bringt er sein EIGENES Gitter mit: dann hat ein
+   * Ausschnitt einen anderen Versatz als der Rest. Das ist einer der wenigen
+   * forensischen Hinweise, die sich schwer faelschen lassen.
+   * ========================================================================= */
+
+  /** Graustufen aus RGBA-Pixeln. Getrennt, damit es in Tests nutzbar bleibt. */
+  function toGray(imageLike) {
+    var d = imageLike.data, w = imageLike.width, h = imageLike.height;
+    var g = new Float32Array(w * h);
+    for (var i = 0, p = 0; p < w * h; i += 4, p++) {
+      g[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    }
+    return g;
+  }
+
+  /**
+   * Bestimmt den Gitterversatz einer Graustufenflaeche.
+   *
+   * Vorgehen: Kantenstaerke je Spalte bzw. Zeile aufsummieren, die Summen
+   * nach ihrer Position modulo 8 gruppieren und schauen, welche Gruppe
+   * heraussticht. Die Staerke des Herausstechens ist zugleich das Mass
+   * dafuer, wie verlaesslich die Aussage ist.
+   *
+   * @returns {{offsetX:number, offsetY:number, strengthX:number,
+   *            strengthY:number, confidence:number}}
+   */
+  function gridOffset(gray, w, h) {
+    var spalten = new Float64Array(w), zeilen = new Float64Array(h);
+    var x, y;
+    // Mass fuer die Blockgrenze an Position x: wie viel groesser ist die Stufe
+    // bei x als die Stufen links und rechts davon.
+    //
+    //   Z(x) = |I(x) - I(x-1)| - ( |I(x-1) - I(x-2)| + |I(x+1) - I(x)| ) / 2
+    //
+    // Fuer eine reine Stufe bei b ergibt das den Hoechstwert exakt bei b und
+    // negative Werte daneben. Ein weicher Verlauf hebt sich dagegen auf, weil
+    // dort alle drei Stufen gleich gross sind.
+    //
+    // Ein naheliegender Kernel mit zweiter Ableitung hat hier eine NULLSTELLE
+    // genau an der Blockgrenze und zwei gleich hohe Ausschlaege daneben - die
+    // gemessene Position haengt dann vom Rauschen ab. Das war messbar um
+    // genau ein Pixel verschoben.
+    for (y = 0; y < h; y++) {
+      for (x = 2; x < w - 1; x++) {
+        var o = y * w + x;
+        spalten[x] += Math.abs(gray[o] - gray[o - 1])
+          - (Math.abs(gray[o - 1] - gray[o - 2]) + Math.abs(gray[o + 1] - gray[o])) / 2;
+      }
+    }
+    for (y = 2; y < h - 1; y++) {
+      for (x = 0; x < w; x++) {
+        var o2 = y * w + x;
+        zeilen[y] += Math.abs(gray[o2] - gray[o2 - w])
+          - (Math.abs(gray[o2 - w] - gray[o2 - 2 * w]) + Math.abs(gray[o2 + w] - gray[o2])) / 2;
+      }
+    }
+
+    function auswerten(summen, n) {
+      var gruppe = new Float64Array(8), anzahl = new Float64Array(8);
+      for (var i = 2; i < n - 1; i++) { gruppe[i % 8] += summen[i]; anzahl[i % 8]++; }
+      var mittel = new Float64Array(8);
+      for (var k = 0; k < 8; k++) mittel[k] = anzahl[k] ? gruppe[k] / anzahl[k] : 0;
+      var gesamt = 0;
+      for (var k2 = 0; k2 < 8; k2++) gesamt += mittel[k2];
+      gesamt /= 8;
+      var best = 0, bestWert = -Infinity, varianz = 0;
+      for (var k3 = 0; k3 < 8; k3++) {
+        if (mittel[k3] > bestWert) { bestWert = mittel[k3]; best = k3; }
+        varianz += (mittel[k3] - gesamt) * (mittel[k3] - gesamt);
+      }
+      varianz = Math.sqrt(varianz / 8);
+      // Wie viele Standardabweichungen liegt die beste Gruppe ueber dem Mittel
+      var staerke = varianz > 0 ? (bestWert - gesamt) / varianz : 0;
+      return { offset: best, strength: staerke, profile: Array.prototype.slice.call(mittel) };
+    }
+
+    var rx = auswerten(spalten, w), ry = auswerten(zeilen, h);
+    return {
+      offsetX: rx.offset, offsetY: ry.offset,
+      strengthX: roundTo(rx.strength, 3), strengthY: roundTo(ry.strength, 3),
+      profileX: rx.profile, profileY: ry.profile,
+      confidence: roundTo(Math.min(rx.strength, ry.strength), 3)
+    };
+  }
+
+  /**
+   * Untersucht das Blockraster global und kachelweise.
+   * Kacheln mit abweichendem Versatz werden markiert.
+   */
+  async function blockingArtifactGrid(source, opts) {
+    opts = opts || {};
+    var kachel = Math.max(48, Math.min(192, opts.tile || 96));
+    var leer = { imageData: null, offsetX: 0, offsetY: 0, confidence: 0,
+                 mismatchTiles: 0, totalTiles: 0, findings: [], error: null };
+    try {
+      var w0 = source.width || source.videoWidth, h0 = source.height || source.videoHeight;
+      if (!w0 || !h0) { leer.error = 'Bild hat keine gültigen Maße.'; return leer; }
+      // Nicht skalieren: jede Umrechnung zerstört genau das Gitter, das
+      // hier gemessen werden soll. Stattdessen einen Ausschnitt begrenzen.
+      var W = Math.min(w0, 1400), H = Math.min(h0, 1400);
+      var c = makeCanvas(W, H);
+      if (!c) { leer.error = 'Keine Zeichenfläche verfügbar.'; return leer; }
+      var ctx = c.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(source, 0, 0, W, H, 0, 0, W, H);   // 1:1, kein Skalieren
+      var img = ctx.getImageData(0, 0, W, H);
+      var gray = toGray(img);
+
+      var global = gridOffset(gray, W, H);
+
+      /* --- kachelweise --- */
+      var cols = Math.floor(W / kachel), rows = Math.floor(H / kachel);
+      var abweichend = [], gesamtKacheln = 0;
+      for (var ty = 0; ty < rows; ty++) {
+        for (var tx = 0; tx < cols; tx++) {
+          var sub = new Float32Array(kachel * kachel);
+          for (var yy = 0; yy < kachel; yy++) {
+            for (var xx = 0; xx < kachel; xx++) {
+              sub[yy * kachel + xx] = gray[(ty * kachel + yy) * W + (tx * kachel + xx)];
+            }
+          }
+          var lokal = gridOffset(sub, kachel, kachel);
+          gesamtKacheln++;
+          // Eine Kachel zaehlt nur als abweichend, wenn ihr eigenes Gitter
+          // deutlich ausgepraegt ist - sonst waere jede glatte Flaeche ein Treffer.
+          if (lokal.confidence >= GITTER_SCHWELLE &&
+              (lokal.offsetX !== global.offsetX || lokal.offsetY !== global.offsetY)) {
+            abweichend.push({ tx: tx, ty: ty, ox: lokal.offsetX, oy: lokal.offsetY });
+          }
+        }
+        if ((ty & 3) === 0) await yieldToUi();
+      }
+
+      /* --- Darstellung: Original abgedunkelt, abweichende Kacheln markiert --- */
+      var out = new Uint8ClampedArray(W * H * 4);
+      var d0 = img.data;
+      for (var i = 0; i < d0.length; i += 4) {
+        out[i] = d0[i] * 0.3; out[i + 1] = d0[i + 1] * 0.3;
+        out[i + 2] = d0[i + 2] * 0.3; out[i + 3] = 255;
+      }
+      abweichend.forEach(function (t) {
+        for (var yy2 = 0; yy2 < kachel; yy2++) {
+          for (var xx2 = 0; xx2 < kachel; xx2++) {
+            var q = ((t.ty * kachel + yy2) * W + (t.tx * kachel + xx2)) * 4;
+            out[q] = Math.min(255, out[q] + 120);
+            out[q + 1] = Math.min(255, out[q + 1] + 40);
+          }
+        }
+      });
+      // Gefundenes Gitter als dünne Linien einzeichnen
+      for (var gx = global.offsetX; gx < W; gx += 8) {
+        for (var gy0 = 0; gy0 < H; gy0 += 4) {
+          var qq = (gy0 * W + gx) * 4;
+          out[qq + 1] = Math.min(255, out[qq + 1] + 70);
+          out[qq + 2] = Math.min(255, out[qq + 2] + 90);
+        }
+      }
+
+      var erg = {
+        imageData: new ImageData(out, W, H),
+        offsetX: global.offsetX, offsetY: global.offsetY,
+        confidence: global.confidence,
+        strengthX: global.strengthX, strengthY: global.strengthY,
+        mismatchTiles: abweichend.length, totalTiles: gesamtKacheln,
+        tileSize: kachel, findings: [], error: null
+      };
+
+      // An Messwerten kalibriert: bei sechs Testbildern lagen alle RICHTIGEN
+      // Ergebnisse bei mindestens 1,60 und alle FALSCHEN bei hoechstens 1,06.
+      // Die Schwelle liegt dazwischen. Sechs Bilder sind eine kleine Stichprobe -
+      // im Zweifel lieber keine Aussage als eine erfundene.
+      erg.schwelle = GITTER_SCHWELLE;
+      erg.verlaesslich = global.confidence >= GITTER_SCHWELLE;
+
+      if (!erg.verlaesslich) {
+        erg.offsetX = null; erg.offsetY = null;   // gar nicht erst behaupten
+        addFinding(erg.findings, 'info',
+          'Kein verlässlich messbares Blockraster (Kennwert ' + global.confidence + ', nötig wären ' +
+          GITTER_SCHWELLE + '). Bei PNG, bei kleinen Bildern, nach starkem Weichzeichnen und bei sehr ' +
+          'hoher JPEG-Qualität ist das normal. Es wird bewusst keine Aussage über einen Beschnitt ' +
+          'getroffen - ein Wert unterhalb dieser Schwelle wäre geraten.');
+      } else if (global.offsetX === 0 && global.offsetY === 0) {
+        addFinding(erg.findings, 'info',
+          'Das Blockraster sitzt auf Versatz (0,0), wie bei einer unbeschnittenen JPEG-Datei erwartet.');
+      } else {
+        addFinding(erg.findings, 'alarm',
+          'Das Blockraster ist um (' + global.offsetX + ', ' + global.offsetY + ') Pixel versetzt. ' +
+          'Bei einer unveränderten JPEG-Datei läge es auf (0,0). Das spricht dafür, dass das Bild ' +
+          'beschnitten und anschließend erneut gespeichert wurde.');
+      }
+      if (abweichend.length > 0 && gesamtKacheln > 0) {
+        var anteil = abweichend.length / gesamtKacheln;
+        addFinding(erg.findings, anteil > 0.03 ? 'alarm' : 'warn',
+          abweichend.length + ' von ' + gesamtKacheln + ' Bildkacheln haben ein anders ausgerichtetes ' +
+          'Blockraster als das Gesamtbild. Eingesetzte Bereiche bringen ihr eigenes Raster mit. ' +
+          'Stark strukturierte Flächen können denselben Effekt vortäuschen.');
+      }
+      return erg;
+    } catch (e) {
+      leer.error = 'Die Blockraster-Analyse ist fehlgeschlagen.';
+      return leer;
+    }
+  }
+
+  /* =========================================================================
+   * 9e. JPEG-Ghosts
+   *
+   * Nach Farid (2009). Ein Bild wird nacheinander mit jeder Qualitaetsstufe
+   * neu kodiert und mit dem Original verglichen. Wurde ein Bereich frueher
+   * schon einmal mit Qualitaet q gespeichert, faellt die Differenz genau bei
+   * q lokal ein - er "verschwindet" kurz. Dieser Einbruch ist der Geist.
+   *
+   * Der Nutzen liegt nicht im Gesamtbild, sondern im Vergleich: hat ein
+   * Ausschnitt seinen Einbruch bei einer ANDEREN Qualitaet als der Rest,
+   * hatte er eine andere Kompressionsvorgeschichte - er stammt aus einer
+   * anderen Datei.
+   *
+   * Das kommt ohne JPEG-Dekoder aus: es braucht nur wiederholtes Kodieren
+   * und Subtrahieren.
+   * ========================================================================= */
+
+  /**
+   * Der auswertbare Kern, bewusst ohne Zeichenflaeche - so laesst er sich
+   * gegen konstruierte Eingaben pruefen.
+   *
+   * @param {Float64Array[]} diffs  je Qualitaetsstufe ein Feld mit einem
+   *                                Differenzwert pro Kachel
+   * @param {number[]} qualities    die zugehoerigen Qualitaetsstufen
+   * @returns {{curve:Array, bestQuality:number, argmin:Int16Array,
+   *            outliers:number, spread:number}}
+   */
+  function ghostAnalyse(diffs, qualities, tileCount) {
+    var nQ = qualities.length;
+    var curve = [], i, q;
+
+    for (q = 0; q < nQ; q++) {
+      var summe = 0;
+      for (i = 0; i < tileCount; i++) summe += diffs[q][i];
+      curve.push({ quality: qualities[q], mean: roundTo(summe / Math.max(1, tileCount), 4) });
+    }
+
+    // Je Kachel die Qualitaetsstufe mit der kleinsten Differenz.
+    var argmin = new Int16Array(tileCount);
+    for (i = 0; i < tileCount; i++) {
+      var best = 0, bestWert = Infinity;
+      for (q = 0; q < nQ; q++) {
+        if (diffs[q][i] < bestWert) { bestWert = diffs[q][i]; best = q; }
+      }
+      argmin[i] = qualities[best];
+    }
+
+    // Gesamteinbruch: die Stufe mit der kleinsten mittleren Differenz.
+    var gBest = qualities[0], gWert = Infinity;
+    for (q = 0; q < nQ; q++) {
+      if (curve[q].mean < gWert) { gWert = curve[q].mean; gBest = qualities[q]; }
+    }
+
+    // Wie stark streuen die Kacheln um diesen Wert? Ein einzelnes, einmal
+    // gespeichertes Bild streut kaum; eingesetzte Bereiche treiben die
+    // Streuung nach oben.
+    var summeAbw = 0, ausreisser = 0;
+    for (i = 0; i < tileCount; i++) {
+      var abw = Math.abs(argmin[i] - gBest);
+      summeAbw += abw;
+      if (abw >= 10) ausreisser++;
+    }
+    return {
+      curve: curve,
+      bestQuality: gBest,
+      argmin: argmin,
+      outliers: ausreisser,
+      spread: roundTo(tileCount ? summeAbw / tileCount : 0, 2)
+    };
+  }
+
+  /** Farbe fuer eine Qualitaetsstufe: blau = niedrig, rot = hoch. */
+  function qualityFarbe(q, qMin, qMax) {
+    var t = (q - qMin) / Math.max(1, qMax - qMin);
+    t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    return [Math.round(40 + 200 * t), Math.round(70 + 90 * (1 - Math.abs(t - 0.5) * 2)), Math.round(240 - 200 * t)];
+  }
+
+  async function jpegGhosts(source, opts) {
+    opts = opts || {};
+    var qMin = opts.qMin || 50, qMax = opts.qMax || 98, step = opts.step || 2;
+    var kachel = Math.max(8, Math.min(48, opts.tile || 16));
+    var leer = { imageData: null, curve: [], bestQuality: null, outliers: 0,
+                 totalTiles: 0, findings: [], error: null };
+    try {
+      var w0 = source.width || source.videoWidth, h0 = source.height || source.videoHeight;
+      if (!w0 || !h0) { leer.error = 'Bild hat keine gültigen Maße.'; return leer; }
+      var s = workSize(w0, h0, 820);
+
+      var c = makeCanvas(s.w, s.h);
+      if (!c) { leer.error = 'Keine Zeichenfläche verfügbar.'; return leer; }
+      var g = c.getContext('2d', { willReadFrequently: true });
+      g.drawImage(source, 0, 0, s.w, s.h);
+      var orig = g.getImageData(0, 0, s.w, s.h).data;
+
+      var cols = Math.floor(s.w / kachel), rows = Math.floor(s.h / kachel);
+      var tileCount = cols * rows;
+      if (tileCount < 4) { leer.error = 'Bild ist für dieses Verfahren zu klein.'; return leer; }
+
+      var qualities = [], diffs = [];
+      for (var q = qMin; q <= qMax; q += step) qualities.push(q);
+
+      for (var qi = 0; qi < qualities.length; qi++) {
+        var blob = await canvasToJpegBlob(c, qualities[qi] / 100);
+        if (!blob) { leer.error = 'Erneute JPEG-Kodierung nicht möglich.'; return leer; }
+        var bmp = await createImageBitmap(blob);
+        var wieder = drawToImageData(bmp, s.w, s.h);
+        if (bmp.close) bmp.close();
+        if (!wieder) { leer.error = 'Vergleichsbild konnte nicht gelesen werden.'; return leer; }
+
+        // Quadratische Differenz, kachelweise gemittelt.
+        var feld = new Float64Array(tileCount);
+        var b = wieder.data;
+        for (var ty = 0; ty < rows; ty++) {
+          for (var tx = 0; tx < cols; tx++) {
+            var acc = 0, n = 0;
+            for (var yy = 0; yy < kachel; yy++) {
+              var zeile = (ty * kachel + yy) * s.w + tx * kachel;
+              for (var xx = 0; xx < kachel; xx++) {
+                var o = (zeile + xx) * 4;
+                var dr = orig[o] - b[o], dg = orig[o + 1] - b[o + 1], db = orig[o + 2] - b[o + 2];
+                acc += (dr * dr + dg * dg + db * db) / 3;
+                n++;
+              }
+            }
+            feld[ty * cols + tx] = n ? acc / n : 0;
+          }
+        }
+        diffs.push(feld);
+        if (opts.onProgress) opts.onProgress((qi + 1) / qualities.length);
+        await yieldToUi();
+      }
+
+      var a = ghostAnalyse(diffs, qualities, tileCount);
+
+      /* --- Karte: Farbe je Kachel nach ihrer Einbruchs-Qualitaet --- */
+      var out = new Uint8ClampedArray(s.w * s.h * 4);
+      for (var ty2 = 0; ty2 < rows; ty2++) {
+        for (var tx2 = 0; tx2 < cols; tx2++) {
+          var f = qualityFarbe(a.argmin[ty2 * cols + tx2], qMin, qMax);
+          for (var yy2 = 0; yy2 < kachel; yy2++) {
+            for (var xx2 = 0; xx2 < kachel; xx2++) {
+              var o2 = ((ty2 * kachel + yy2) * s.w + tx2 * kachel + xx2) * 4;
+              out[o2] = f[0]; out[o2 + 1] = f[1]; out[o2 + 2] = f[2]; out[o2 + 3] = 255;
+            }
+          }
+        }
+      }
+      for (var r2 = 0; r2 < out.length; r2 += 4) if (out[r2 + 3] === 0) out[r2 + 3] = 255;
+
+      var erg = {
+        imageData: new ImageData(out, s.w, s.h),
+        curve: a.curve, bestQuality: a.bestQuality,
+        outliers: a.outliers, spread: a.spread,
+        totalTiles: tileCount, tileSize: kachel,
+        qMin: qMin, qMax: qMax,
+        scaled: s.scaled, findings: [], error: null
+      };
+
+      addFinding(erg.findings, 'info',
+        'Der stärkste Einbruch liegt bei Qualitätsstufe ' + a.bestQuality +
+        '. Das ist die Stufe, mit der das Bild zuletzt gespeichert wurde.');
+
+      var anteil = tileCount ? a.outliers / tileCount : 0;
+      if (anteil > 0.08) {
+        addFinding(erg.findings, 'alarm',
+          Math.round(anteil * 100) + ' % der Bildkacheln haben ihren Einbruch bei einer deutlich ' +
+          'anderen Qualitätsstufe als das Gesamtbild. Das ist das Muster, das entsteht, wenn ein ' +
+          'Bereich aus einer anders komprimierten Datei eingesetzt wurde. In der Ghost-Ansicht ' +
+          'prüfen, ob die abweichenden Kacheln eine zusammenhängende Form bilden - verstreute ' +
+          'Einzelkacheln sind meist nur Bildrauschen.');
+      } else if (anteil > 0.02) {
+        addFinding(erg.findings, 'warn',
+          Math.round(anteil * 100) + ' % der Kacheln weichen in ihrer Einbruchs-Qualität ab. ' +
+          'Bei strukturarmen Flächen kommt das auch ohne Manipulation vor.');
+      }
+      if (a.spread < 2 && a.bestQuality >= qMax - step) {
+        addFinding(erg.findings, 'info',
+          'Kein klarer Einbruch unterhalb der höchsten geprüften Stufe. Typisch für Bilder, die ' +
+          'noch nie als JPEG gespeichert wurden - etwa PNG-Dateien oder Bildschirmfotos.');
+      }
+      return erg;
+    } catch (e) {
+      leer.error = 'Die Ghost-Analyse ist fehlgeschlagen.';
+      return leer;
+    }
+  }
+
+  /* =========================================================================
    * 10. Gesamtbericht
    * ========================================================================= */
 
@@ -1614,6 +2018,16 @@
         reportProgress(opts.onProgress, 'rauschen', 0.75);
         erg.rauschen = await noiseResidual(bmp);
         if (erg.rauschen && erg.rauschen.error) erg.fehler.push(erg.rauschen.error);
+
+        reportProgress(opts.onProgress, 'blockraster', 0.80);
+        erg.blockraster = await blockingArtifactGrid(bmp, opts.blockraster);
+        if (erg.blockraster && erg.blockraster.error) erg.fehler.push(erg.blockraster.error);
+        else if (erg.blockraster) {
+          for (var bf = 0; bf < erg.blockraster.findings.length; bf++) {
+            addFinding(erg.metadaten.findings,
+              erg.blockraster.findings[bf].level, erg.blockraster.findings[bf].text);
+          }
+        }
 
         reportProgress(opts.onProgress, 'phash', 0.85);
         erg.perzeptuell = await perceptualHashes(bmp);
@@ -1665,10 +2079,14 @@
     copyMoveHint: copyMoveHint,
     report: report,
     analyseQuantTables: analyseQuantTables,
+    blockingArtifactGrid: blockingArtifactGrid,
+    jpegGhosts: jpegGhosts,
     perceptualHashes: perceptualHashes,
     hammingDistance: hammingDistance,
     // für Tests in Node
     _intern: {
+      toGray: toGray, gridOffset: gridOffset, GITTER_SCHWELLE: GITTER_SCHWELLE,
+      ghostAnalyse: ghostAnalyse, qualityFarbe: qualityFarbe,
       deZigzag: deZigzag, ijgScale: ijgScale, matchIjgQuality: matchIjgQuality,
       dct2d: dct2d, bitsToHex: bitsToHex, averageHashFrom: averageHashFrom,
       differenceHashFrom: differenceHashFrom, perceptualHashFrom: perceptualHashFrom,

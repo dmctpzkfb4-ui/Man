@@ -25,6 +25,8 @@ für Konfidenz und Überlappung einstellbar, Einzelbild festhalten.
 | Histogramm | Tonwertverteilung, beschnittene Tiefen und Lichter |
 | Quantisierungstabellen | Qualitätsstufe und ob Kamera oder Software die Datei schrieb |
 | Wahrnehmungs-Prüfsummen | aHash, dHash, pHash — bleiben bei Skalierung stabil |
+| Blockraster | Versatz des 8×8-Gitters: verrät Beschnitt und eingesetzte Bereiche |
+| JPEG-Ghosts | bei welcher Qualitätsstufe jede Bildkachel zuletzt gespeichert wurde |
 
 Dazu Zoom bis 16-fach mit Ziehen und Aufziehen, ein Klassenfilter für die
 Live-Erkennung, ein Bildvergleich über den pHash-Abstand und ein
@@ -49,6 +51,31 @@ Befunde sind Hinweise, keine Beweise. Die Texte in der App sagen das auch so:
 Metadaten lassen sich entfernen und fälschen, gleichmäßige Flächen erzeugen
 Fehlalarme im Copy-Move-Verfahren, und ein Foto ohne EXIF ist normalerweise
 nur durch ein soziales Netzwerk gelaufen.
+
+### Blockraster
+
+JPEG komprimiert in 8×8-Blöcken. An den Blockgrenzen entstehen feine Kanten,
+die im Bild ein regelmäßiges Gitter bilden. Bei einer unberührten Datei sitzt
+es exakt auf Versatz (0,0). Wird ein Bild beschnitten und neu gespeichert,
+wandert das alte Gitter mit. Und ein eingesetzter Bereich bringt sein *eigenes*
+Gitter mit — dann hat ein Ausschnitt einen anderen Versatz als der Rest.
+
+Das Verfahren antwortet nur oberhalb eines Kennwerts von 1,3. Diese Schwelle
+ist an Testbildern mit bekanntem Beschnitt kalibriert: alle richtigen
+Ergebnisse lagen bei mindestens 1,60, alle falschen bei höchstens 1,06. Sechs
+Bilder sind eine kleine Stichprobe, darum die Regel — **unterhalb der Schwelle
+wird gar keine Aussage getroffen**, statt eine zu erfinden.
+
+### JPEG-Ghosts
+
+Nach Farid (2009). Das Bild wird mit jeder Qualitätsstufe von 50 bis 98 neu
+kodiert und mit sich selbst verglichen. Wurde ein Bereich früher schon einmal
+mit Stufe *q* gespeichert, bricht die Differenz genau bei *q* ein — er
+„verschwindet" kurz. Hat ein Ausschnitt seinen Einbruch bei einer anderen
+Stufe als der Rest, hatte er eine andere Kompressionsvorgeschichte.
+
+Braucht rund 25 Neukodierungen und läuft deshalb auf Anforderung, nicht
+automatisch. Es kommt ohne JPEG-Dekoder aus: nur Kodieren und Subtrahieren.
 
 ## Bauen
 

@@ -129,6 +129,8 @@
           <button class="btn btn--sm" data-layer="ela" type="button" disabled>ELA</button>
           <button class="btn btn--sm" data-layer="noise" type="button" disabled>Rauschen</button>
           <button class="btn btn--sm" data-layer="copymove" type="button" disabled>Copy-Move</button>
+          <button class="btn btn--sm" data-layer="blockraster" type="button" disabled>Blockraster</button>
+          <button class="btn btn--sm" data-layer="ghosts" type="button" disabled>Ghosts</button>
         </div>
         <p class="seg-note" id="segNote"></p>
 
@@ -137,8 +139,10 @@
           <button class="btn btn--ghost btn--sm" id="detectStillBtn" type="button" disabled>Objekte erkennen</button>
           <button class="btn btn--ghost btn--sm" id="otherFileBtn" type="button">Anderes Bild</button>
           <button class="btn btn--ghost btn--sm" id="compareBtn" type="button" disabled>Mit Bild vergleichen</button>
+          <button class="btn btn--ghost btn--sm" id="ghostBtn" type="button" disabled>Ghost-Analyse</button>
           <button class="btn btn--primary btn--sm" id="reportBtn" type="button" disabled>Bericht sichern</button>
         </div>
+        <div class="progress" id="ghostProgress" hidden><span class="progress-bar" id="ghostProgressBar"></span></div>
         <input type="file" id="compareInput" accept="image/*" hidden>
 
         <div class="progress" id="analyseProgress" hidden><span class="progress-bar" id="analyseProgressBar"></span></div>
@@ -152,6 +156,17 @@
             <p class="file-line" id="fileLine"></p>
             <div class="hashes" id="hashes"></div>
             <p class="footnote">Die Prüfsummen belegen, dass die untersuchte Datei unverändert ist. Notiere sie, bevor du die Datei weitergibst.</p>
+          </div>
+        </div>
+
+        <div class="panel" id="ghostPanel" hidden>
+          <div class="panel-head">
+            <h2 class="panel-title">Kompressionsverlauf</h2>
+            <span class="panel-head-note" id="ghostNote"></span>
+          </div>
+          <div class="panel-body">
+            <div class="hist-wrap"><canvas id="ghostCanvas" height="140"></canvas></div>
+            <p class="footnote">Jeder Punkt ist eine Qualitätsstufe. Der tiefste Punkt ist die Stufe, mit der das Bild zuletzt gespeichert wurde. Ein zweiter Einbruch deutet auf eine frühere Kompression mit anderer Stufe hin.</p>
           </div>
         </div>
 

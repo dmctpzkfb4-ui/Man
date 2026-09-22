@@ -167,5 +167,91 @@ t('Hamming: vier Bit', F.hammingDistance('0','f') === 4);
 t('Hamming: verschiedene Länge = -1', F.hammingDistance('ab','abc') === -1);
 t('Hamming: kein String = -1', F.hammingDistance(null,'ab') === -1);
 
+/* ---------- 11. Blockraster gegen erzeugte Wahrheit ---------- */
+console.log('\n[Blockraster]');
+// Eine reine Stufe bei x=19: der Ausschlag muss exakt dort liegen (19 mod 8 = 3),
+// nicht daneben. Genau das ging mit einem Kernel zweiter Ableitung schief.
+{
+  const w = 64, h = 8, b = 19;
+  const g = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) g[y * w + x] = x < b ? 40 : 200;
+  const r = I.gridOffset(g, w, h);
+  t('reine Stufe: Ausschlag exakt an der Grenze', r.offsetX === b % 8, `${r.offsetX} statt ${b % 8}`);
+}
+{
+  // Gleichförmige Fläche hat kein Raster -> Verlässlichkeit muss niedrig sein
+  const g = new Float32Array(64 * 64).fill(128);
+  const r = I.gridOffset(g, 64, 64);
+  t('glatte Fläche: keine verlässliche Aussage', r.confidence < 1, r.confidence);
+}
+
+// Echte JPEG-Dateien mit bekanntem Beschnitt (tools/make-fixtures.py).
+// Geprüft wird die Eigenschaft, auf die es ankommt:
+// DAS WERKZEUG DARF NIE EINE FALSCHE ANTWORT MIT HOHER VERLÄSSLICHKEIT GEBEN.
+// Eine verweigerte Aussage ist in Ordnung; eine erfundene nicht.
+{
+  const man = JSON.parse(readFileSync(join(here, 'fixtures/manifest.json'), 'utf8'));
+  const SCHWELLE = I.GITTER_SCHWELLE;
+  console.log(`    Schwelle für eine belastbare Aussage: ${SCHWELLE}`);
+  let belastbar = 0;
+  for (const m of man) {
+    const raw = readFileSync(join(here, 'fixtures', m.name + '.gray'));
+    const g = new Float32Array(raw.length);
+    for (let i = 0; i < raw.length; i++) g[i] = raw[i];
+    const r = I.gridOffset(g, m.w, m.h);
+    const richtig = r.offsetX === m.erwartet.x && r.offsetY === m.erwartet.y;
+    const ueber = r.confidence >= SCHWELLE;
+    if (ueber) belastbar++;
+    t(`${m.name}: keine falsche Aussage über der Schwelle`,
+      !ueber || richtig,
+      `(${r.offsetX},${r.offsetY}) statt (${m.erwartet.x},${m.erwartet.y}) bei ${r.confidence}`);
+    console.log(`        ${m.w}×${m.h}  gemessen (${r.offsetX},${r.offsetY})  ` +
+      `Verlässlichkeit ${r.confidence.toFixed(2)}  ` +
+      `${ueber ? (richtig ? 'belastbar und richtig' : 'BELASTBAR ABER FALSCH') : 'verweigert'}`);
+  }
+  t('mindestens die großen Bilder liefern eine Aussage', belastbar >= 3, belastbar);
+}
+
+/* ---------- 12. Ghost-Auswertung ---------- */
+console.log('\n[JPEG-Ghosts]');
+const qs = [];
+for (let q = 50; q <= 98; q += 2) qs.push(q);
+const iQ75 = qs.indexOf(76);   // Stufe, an der der Einbruch sitzen soll
+
+function baueWuerfel(kacheln, einbruchIndex, abweicher) {
+  // Grunddifferenz faellt mit steigender Qualitaet; am Einbruch zusaetzlich tief.
+  return qs.map((q, qi) => {
+    const f = new Float64Array(kacheln);
+    for (let i = 0; i < kacheln; i++) {
+      const ziel = (abweicher && abweicher.has(i)) ? qs.length - 2 : einbruchIndex;
+      f[i] = 100 - qi * 0.5 + (qi === ziel ? -40 : 0);
+    }
+    return f;
+  });
+}
+
+{
+  const a = I.ghostAnalyse(baueWuerfel(100, iQ75, null), qs, 100);
+  t('findet den Einbruch', a.bestQuality === qs[iQ75], a.bestQuality);
+  t('keine Ausreißer bei einheitlichem Bild', a.outliers === 0, a.outliers);
+  t('keine Streuung', a.spread === 0, a.spread);
+  t('Kurve hat einen Punkt je Stufe', a.curve.length === qs.length);
+}
+{
+  const fremd = new Set([...Array(20).keys()]);   // 20 von 100 Kacheln abweichend
+  const a = I.ghostAnalyse(baueWuerfel(100, iQ75, fremd), qs, 100);
+  t('Gesamteinbruch bleibt bei der Mehrheit', a.bestQuality === qs[iQ75], a.bestQuality);
+  t('erkennt die 20 fremden Kacheln', a.outliers === 20, a.outliers);
+  t('Streuung steigt', a.spread > 0);
+}
+{
+  const a = I.ghostAnalyse([new Float64Array(1)], [80], 1);
+  t('einzelne Stufe stürzt nicht ab', a.bestQuality === 80 && a.outliers === 0);
+}
+t('Farbskala: niedrig ≠ hoch',
+  I.qualityFarbe(50, 50, 98).join() !== I.qualityFarbe(98, 50, 98).join());
+t('Farbskala klemmt außerhalb',
+  I.qualityFarbe(200, 50, 98).every(v => v >= 0 && v <= 255));
+
 console.log(`\n${'='.repeat(46)}\n${ok} bestanden, ${fail} fehlgeschlagen`);
 process.exit(fail ? 1 : 0);

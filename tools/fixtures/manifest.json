@@ -1,0 +1,62 @@
+[
+ {
+  "name": "gross_einmal",
+  "w": 512,
+  "h": 512,
+  "erwartet": {
+   "x": 0,
+   "y": 0
+  },
+  "messbar": true
+ },
+ {
+  "name": "gross_beschnitten",
+  "w": 480,
+  "h": 480,
+  "erwartet": {
+   "x": 5,
+   "y": 3
+  },
+  "messbar": true
+ },
+ {
+  "name": "gross_ohne_beschnitt",
+  "w": 480,
+  "h": 480,
+  "erwartet": {
+   "x": 0,
+   "y": 0
+  },
+  "messbar": true
+ },
+ {
+  "name": "klein_einmal",
+  "w": 256,
+  "h": 256,
+  "erwartet": {
+   "x": 0,
+   "y": 0
+  },
+  "messbar": false
+ },
+ {
+  "name": "klein_beschnitten",
+  "w": 224,
+  "h": 224,
+  "erwartet": {
+   "x": 5,
+   "y": 3
+  },
+  "messbar": false
+ },
+ {
+  "name": "klein_ohne_beschnitt",
+  "w": 224,
+  "h": 224,
+  "erwartet": {
+   "x": 0,
+   "y": 0
+  },
+  "messbar": false
+ }
+]

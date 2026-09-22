@@ -18,7 +18,7 @@
     conf: 0.25, iou: 0.45,
     fpsWindow: [], lastHits: [],
     bild: null, bitmap: null, layers: {}, layer: 'original',
-    bericht: null, filter: null,
+    bericht: null, filter: null, ghosts: null,
     zoom: 1, panX: 0, panY: 0,
     log: []
   };
@@ -306,7 +306,9 @@
     var scale = $('analyseScale');
     var hinweis = { original: '', ela: 'Helle Bereiche wurden anders komprimiert als ihre Umgebung.',
       noise: 'Dunkle, glatte Zonen deuten auf Weichzeichnung oder Retusche.',
-      copymove: 'Rot markierte Blöcke gleichen weit entfernten Blöcken.' };
+      copymove: 'Rot markierte Blöcke gleichen weit entfernten Blöcken.',
+      blockraster: 'Rot markierte Kacheln haben ein anders ausgerichtetes 8×8-Raster als das Gesamtbild.',
+      ghosts: 'Farbe je Kachel nach der Qualitätsstufe, bei der ihre Differenz einbricht. Ein abweichend gefärbter, zusammenhängender Bereich ist verdächtig.' };
     $('segNote').textContent = hinweis[S.layer] || '';
     scale.hidden = true;
   }
@@ -326,6 +328,9 @@
     catch (e) { toast('Bild konnte nicht dekodiert werden.'); $('analyseProgress').hidden = true; return; }
 
     S.layers = { original: null };
+    S.ghosts = null;
+    $('ghostPanel').hidden = true;
+    document.querySelectorAll('#viewSeg button[data-layer="ghosts"]').forEach(function (b) { b.disabled = true; });
     S.layer = 'original';
     zoomZurueck();
     $('zoomBar').hidden = false;
@@ -362,6 +367,10 @@
     if (bericht.ela && bericht.ela.imageData) S.layers.ela = bericht.ela.imageData;
     if (bericht.rauschen && bericht.rauschen.imageData) S.layers.noise = bericht.rauschen.imageData;
     if (bericht.copyMove && bericht.copyMove.imageData) S.layers.copymove = bericht.copyMove.imageData;
+    if (bericht.blockraster && bericht.blockraster.imageData) S.layers.blockraster = bericht.blockraster.imageData;
+    // Die Ghost-Ebene entsteht erst auf Anforderung - sie kostet rund
+    // 25 Neukodierungen und soll die normale Analyse nicht ausbremsen.
+    $('ghostBtn').disabled = false;
 
     /* --- Befunde --- */
     var f = bericht.metadaten.findings || [];
@@ -716,6 +725,8 @@
     if (S.layers.ela) bilder.push(['Fehlerniveau (ELA)', datenUrlVon(S.layers.ela)]);
     if (S.layers.noise) bilder.push(['Rauschrest', datenUrlVon(S.layers.noise)]);
     if (S.layers.copymove) bilder.push(['Copy-Move-Hinweis', datenUrlVon(S.layers.copymove)]);
+    if (S.layers.blockraster) bilder.push(['Blockraster', datenUrlVon(S.layers.blockraster)]);
+    if (S.layers.ghosts) bilder.push(['JPEG-Ghosts', datenUrlVon(S.layers.ghosts)]);
 
     var zeilen = Object.keys(m.tags || {}).map(function (k) {
       return '<tr><th>' + esc(k) + '</th><td>' + esc(m.tags[k]) + '</td></tr>';
@@ -765,6 +776,21 @@
       '<tr><th>ELA — größte Abweichung</th><td>' + num(b.ela && b.ela.maxError, 0) + '</td></tr>' +
       '<tr><th>Rauschen — Gleichmäßigkeit</th><td>' + num(b.rauschen && b.rauschen.uniformity, 3) + '</td></tr>' +
       '<tr><th>Copy-Move — verdächtige Blöcke</th><td>' + ((b.copyMove && b.copyMove.suspectBlocks) || 0) + '</td></tr>' +
+      (b.blockraster && !b.blockraster.error
+        ? '<tr><th>Blockraster — Versatz</th><td>' +
+            (b.blockraster.verlaesslich
+              ? '(' + b.blockraster.offsetX + ', ' + b.blockraster.offsetY + ')'
+              : 'nicht verlässlich messbar') +
+            ' <span style="color:#777">(Kennwert ' + num(b.blockraster.confidence, 2) +
+            ', nötig ' + b.blockraster.schwelle + ')</span></td></tr>' +
+          '<tr><th>Blockraster — abweichende Kacheln</th><td>' + b.blockraster.mismatchTiles +
+            ' von ' + b.blockraster.totalTiles + '</td></tr>'
+        : '') +
+      (b.ghosts && !b.ghosts.error
+        ? '<tr><th>Ghosts — Einbruch bei Stufe</th><td>' + b.ghosts.bestQuality + '</td></tr>' +
+          '<tr><th>Ghosts — abweichende Kacheln</th><td>' + b.ghosts.outliers + ' von ' +
+            b.ghosts.totalTiles + ' (Streuung ' + num(b.ghosts.spread, 2) + ')</td></tr>'
+        : '') +
       (b.histogramm ? '<tr><th>Tiefen beschnitten</th><td>' + num(b.histogramm.clippedLowPct, 2) + ' %</td></tr>' +
         '<tr><th>Lichter beschnitten</th><td>' + num(b.histogramm.clippedHighPct, 2) + ' %</td></tr>' : '') +
       '</table>' +
@@ -795,6 +821,113 @@
     setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
     log('bericht', 'Analysebericht gesichert', a.download);
     toast('Bericht gesichert. Im Browser öffnen und bei Bedarf als PDF drucken.');
+  }
+
+  /* ====================================================== Ghost-Analyse */
+
+  async function starteGhosts() {
+    if (!S.bitmap || !window.Forensics) return;
+    var btn = $('ghostBtn');
+    btn.disabled = true;
+    $('ghostProgress').hidden = false;
+    var bar = $('ghostProgressBar');
+    bar.style.width = '2%';
+    log('analyse', 'Ghost-Analyse gestartet', 'Qualitätsstufen 50 bis 98');
+
+    var g = await window.Forensics.jpegGhosts(S.bitmap, {
+      onProgress: function (v) { bar.style.width = Math.round(v * 100) + '%'; }
+    });
+
+    $('ghostProgress').hidden = true;
+    btn.disabled = false;
+
+    if (g.error) { toast(g.error, 5000); log('fehler', 'Ghost-Analyse fehlgeschlagen', g.error); return; }
+
+    S.layers.ghosts = g.imageData;
+    S.ghosts = g;
+    if (S.bericht) S.bericht.ghosts = g;
+
+    document.querySelectorAll('#viewSeg button[data-layer="ghosts"]').forEach(function (b) { b.disabled = false; });
+    $('ghostPanel').hidden = false;
+    $('ghostNote').textContent = 'Einbruch bei Stufe ' + g.bestQuality;
+    zeichneGhostKurve(g);
+
+    // Neue Befunde in die Liste aufnehmen
+    (g.findings || []).forEach(function (f) {
+      var lvl = f.level === 'alarm' ? 'crit' : f.level;
+      var d = document.createElement('div');
+      d.className = 'finding';
+      d.setAttribute('data-level', lvl);
+      d.innerHTML = '<span class="finding-mark"></span><span class="finding-text"></span>';
+      d.querySelector('.finding-text').textContent = f.text;
+      $('findingsList').appendChild(d);
+      if (S.bericht && S.bericht.metadaten) S.bericht.metadaten.findings.push(f);
+      log('befund', f.text.slice(0, 80) + (f.text.length > 80 ? '…' : ''), 'Stufe: ' + f.level);
+    });
+    $('findingsNote').textContent = $('findingsList').children.length + ' Befunde';
+
+    S.layer = 'ghosts';
+    document.querySelectorAll('#viewSeg button').forEach(function (x) {
+      x.classList.toggle('is-active', x.dataset.layer === 'ghosts');
+    });
+    zeichneLayer();
+    log('analyse', 'Ghost-Analyse abgeschlossen',
+      'Einbruch bei Stufe ' + g.bestQuality + ' · ' + g.outliers + ' von ' + g.totalTiles +
+      ' Kacheln abweichend · Streuung ' + g.spread);
+  }
+
+  function zeichneGhostKurve(g) {
+    var c = $('ghostCanvas');
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var w = c.clientWidth || 300, h = 140;
+    c.width = w * dpr; c.height = h * dpr;
+    var ctx = c.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    if (!g.curve || g.curve.length < 2) return;
+
+    var werte = g.curve.map(function (p) { return p.mean; });
+    var min = Math.min.apply(null, werte), max = Math.max.apply(null, werte);
+    var spanne = Math.max(1e-6, max - min);
+    var padL = 8, padR = 8, padT = 12, padB = 20;
+    var bw = w - padL - padR, bh = h - padT - padB;
+
+    ctx.strokeStyle = 'rgba(255,255,255,.07)';
+    for (var yy = 0; yy <= 3; yy++) {
+      var y = padT + (bh / 3) * yy;
+      ctx.beginPath(); ctx.moveTo(padL, y); ctx.lineTo(padL + bw, y); ctx.stroke();
+    }
+
+    ctx.beginPath();
+    g.curve.forEach(function (p, i) {
+      var x = padL + (i / (g.curve.length - 1)) * bw;
+      var y = padT + bh - ((p.mean - min) / spanne) * bh;
+      if (i) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+    });
+    ctx.strokeStyle = '#46A8C9';
+    ctx.lineWidth = 2; ctx.lineJoin = 'round';
+    ctx.stroke();
+
+    // Den Einbruch markieren - das ist die Aussage der ganzen Kurve.
+    var bi = 0;
+    for (var i2 = 1; i2 < g.curve.length; i2++) if (g.curve[i2].mean < g.curve[bi].mean) bi = i2;
+    var mx = padL + (bi / (g.curve.length - 1)) * bw;
+    var my = padT + bh - ((g.curve[bi].mean - min) / spanne) * bh;
+    ctx.strokeStyle = 'rgba(204,156,61,.55)';
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(mx, padT); ctx.lineTo(mx, padT + bh); ctx.stroke();
+    ctx.fillStyle = '#CC9C3D';
+    ctx.beginPath(); ctx.arc(mx, my, 3.5, 0, Math.PI * 2); ctx.fill();
+
+    ctx.fillStyle = '#6C818B';
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.textBaseline = 'top';
+    ctx.fillText(String(g.curve[0].quality), padL, padT + bh + 5);
+    var letzte = String(g.curve[g.curve.length - 1].quality);
+    ctx.fillText(letzte, padL + bw - ctx.measureText(letzte).width, padT + bh + 5);
+    ctx.fillStyle = '#CC9C3D';
+    var lab = String(g.curve[bi].quality);
+    ctx.fillText(lab, Math.min(padL + bw - 14, Math.max(padL, mx - 6)), padT + bh + 5);
   }
 
   /* ============================================================== Start */
@@ -893,6 +1026,7 @@
       this.value = '';
     });
     $('reportBtn').addEventListener('click', sichereBericht);
+    $('ghostBtn').addEventListener('click', starteGhosts);
 
     $('classSearch').addEventListener('input', function () { baueKlassenChips(this.value); });
     $('clearFilterBtn').addEventListener('click', function () {
