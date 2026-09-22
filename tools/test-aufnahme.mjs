@@ -87,6 +87,70 @@ const zeitleiste = await p.evaluate(()=>{
 t('Zeitleiste enthält Ereignisse', zeitleiste.anzahl >= 2, JSON.stringify(zeitleiste));
 console.log('    Ereignisarten: ' + zeitleiste.arten.join(', '));
 
+console.log('\n[Hintergrundbetrieb]');
+{
+  // Neue Aufnahme starten, dann die Seite auf "unsichtbar" schalten.
+  // requestAnimationFrame feuert dann nicht mehr - die Schleife muss auf
+  // setTimeout wechseln, sonst friert die Aufnahme ein.
+  await p.click('#recBtn');
+  await p.waitForFunction(()=>document.getElementById('recBtn').textContent==='Stopp',{timeout:10000});
+  await new Promise(r=>setTimeout(r,2500));
+  const vorher = await p.evaluate(()=>window.Detector.stats.framesProcessed);
+
+  // Sichtbarkeit wegnehmen
+  const cdp = await p.context().newCDPSession(p);
+  await cdp.send('Emulation.setPageVisibilityOverride', { visibility: 'hidden' }).catch(()=>{});
+  await p.evaluate(()=>{
+    Object.defineProperty(document,'hidden',{configurable:true,get:()=>true});
+    Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>'hidden'});
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await new Promise(r=>setTimeout(r,12000));
+  const imHintergrund = await p.evaluate(()=>({
+    bilder: window.Detector.stats.framesProcessed,
+    laeuft: document.getElementById('recBtn').textContent === 'Stopp',
+    zeit: document.getElementById('recZeit').textContent
+  }));
+
+  t('Erkennung läuft im Hintergrund weiter', imHintergrund.bilder > vorher + 3,
+    `${vorher} -> ${imHintergrund.bilder}`);
+  t('Aufnahme bleibt aktiv', imHintergrund.laeuft, imHintergrund.zeit);
+  console.log(`    ${vorher} -> ${imHintergrund.bilder} Bilder, Zeit ${imHintergrund.zeit}`);
+
+  // Wieder sichtbar machen und beenden
+  await p.evaluate(()=>{
+    Object.defineProperty(document,'hidden',{configurable:true,get:()=>false});
+    Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>'visible'});
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+  await cdp.send('Emulation.setPageVisibilityOverride', { visibility: 'visible' }).catch(()=>{});
+  await p.click('#recBtn');
+  await p.waitForFunction(()=>!document.getElementById('recSaveBtn').disabled,{timeout:20000});
+  const zweites = await p.evaluate(()=>new Promise(res=>{
+    const v=document.createElement('video'); v.muted=true;
+    v.onloadedmetadata=()=>res({bytes:window.__recBlob.size, breite:v.videoWidth, ok:true});
+    v.onerror=()=>res({bytes:window.__recBlob.size, ok:false});
+    v.src=URL.createObjectURL(window.__recBlob);
+    setTimeout(()=>res({bytes:window.__recBlob.size, ok:false, grund:'Zeitüberschreitung'}),8000);
+  }));
+  // Kopflos laesst sich echtes Hintergrundverhalten nicht nachstellen -
+  // geprueft wird deshalb, dass ueberhaupt ein gueltiges Video entsteht,
+  // waehrend die Anwendung sich fuer unsichtbar haelt.
+  t('Aufnahme über den Sichtbarkeitswechsel hinweg bleibt gültig',
+    zweites.ok && zweites.bytes > 3000, JSON.stringify(zweites));
+  console.log(`    zweite Aufnahme: ${zweites.bytes} Byte, ${zweites.breite||'?'} px breit`);
+}
+
+console.log('\n[Speicherweg]');
+{
+  const sp = await p.evaluate(()=>({
+    hatFunktion: typeof window.__sichereDatei === 'function',
+    hatPlugin: !!(window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.Filesystem)
+  }));
+  t('Speicherfunktion vorhanden', sp.hatFunktion, JSON.stringify(sp));
+  console.log('    Dateisystem-Plugin im Browser: ' + (sp.hatPlugin ? 'ja' : 'nein (Rückfall auf Download)'));
+}
+
 t('keine Seitenfehler', fehler.length === 0, fehler.slice(0,2).join(' | '));
 
 await b.close(); srv.close();

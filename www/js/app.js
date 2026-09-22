@@ -7,8 +7,8 @@
 (function () {
   'use strict';
 
-  var FASSUNG = "2.4";
-  var STAND = "2026-09-22 22:25";
+  var FASSUNG = "2.5";
+  var STAND = "2026-09-22 23:40";
 
   var $ = function (id) { return document.getElementById(id); };
   /* Leistungsstufen. Gemessen auf vier CPU-Kernen gegen ein Referenzbild:
@@ -432,17 +432,31 @@
   var letzterLauf = 0;
   function taktMs() { return (STUFEN[S.stufe] || STUFEN.ausgewogen).takt; }
 
+  /**
+   * Naechsten Durchlauf planen.
+   *
+   * requestAnimationFrame feuert nicht mehr, sobald die Seite unsichtbar ist -
+   * eine laufende Aufnahme waere damit sofort eingefroren. Im Hintergrund
+   * uebernimmt deshalb setTimeout. Android drosselt das zwar, aber ein
+   * Vordergrunddienst haelt die Drosselung in Grenzen, und ein paar Bilder
+   * je Sekunde genuegen fuer eine Aufnahme.
+   */
+  function plane(fn) {
+    if (document.hidden) setTimeout(fn, Math.max(taktMs(), 100));
+    else requestAnimationFrame(fn);
+  }
+
   async function schleife() {
     if (!S.running) return;
     var jetzt = performance.now();
-    if (jetzt - letzterLauf < taktMs()) { requestAnimationFrame(schleife); return; }
+    if (jetzt - letzterLauf < taktMs()) { plane(schleife); return; }
     letzterLauf = jetzt;
     if (S.detectorReady && !S.busy) {
       S.busy = true;
       var t0 = performance.now();
       try {
         var quelle = await holeBild();
-        if (!quelle) { S.busy = false; requestAnimationFrame(schleife); return; }
+        if (!quelle) { S.busy = false; plane(schleife); return; }
         if (S.quelle === 'bildschirm' && S.schirmNativ) zeigeSchirmbild(quelle);
         var roh = await window.Detector.detect(quelle, { conf: S.conf, iou: S.iou, maxDet: 60 });
         var hits = filtere(roh);
@@ -481,7 +495,7 @@
       }
       S.busy = false;
     }
-    requestAnimationFrame(schleife);
+    plane(schleife);
   }
 
   /* ================================================== Bildschirm als Quelle
@@ -829,13 +843,8 @@
     c.toBlob(function (b) {
       if (!b) { toast('Ansicht konnte nicht gesichert werden.'); return; }
       var name = (S.bericht && S.bericht.dateiname || 'bild').replace(/\.[^.]+$/, '');
-      var a = document.createElement('a');
-      a.href = URL.createObjectURL(b);
-      a.download = 'ansicht-' + name + '-' + S.layer +
-        (S.darstellung !== 'keine' ? '-' + S.darstellung : '') + '.png';
-      a.click();
-      setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
-      log('export', 'Ansicht gesichert', a.download);
+      sichereDatei(b, 'ansicht-' + name + '-' + S.layer +
+        (S.darstellung !== 'keine' ? '-' + S.darstellung : '') + '.png', 'Ansicht');
     }, 'image/png');
   }
 
@@ -1012,6 +1021,83 @@
     try { document.execCommand('copy'); } catch (e) {}
     a.remove();
   }
+
+  /* ====================================================== Dateien sichern
+   *
+   * Ein <a download> loest in einer Android-WebView KEINEN Dateidialog aus -
+   * der Klick verpufft, ohne Fehlermeldung. Genau daran sind hier saemtliche
+   * Ausgaben still gescheitert: Video, Zeitleiste, Bericht, Protokoll,
+   * Ansicht. Auf Android wird deshalb ueber das Dateisystem-Plugin in die
+   * Dokumente geschrieben und der Pfad genannt; im Browser bleibt der
+   * gewohnte Weg.
+   * ====================================================================== */
+
+  function dateiPlugin() {
+    var P = window.Capacitor && window.Capacitor.Plugins;
+    return (P && P.Filesystem) ? P.Filesystem : null;
+  }
+
+  /** Blob -> base64 ohne den Kopf "data:...;base64,". */
+  function alsBase64(blob) {
+    return new Promise(function (aufloesen, ablehnen) {
+      var r = new FileReader();
+      // readAsDataURL verarbeitet auch grosse Blobs am Stueck - eine eigene
+      // Schleife ueber Bloecke wuerde bei Videos den Stapel sprengen.
+      r.onload = function () {
+        var s2 = String(r.result);
+        var k = s2.indexOf(',');
+        aufloesen(k >= 0 ? s2.slice(k + 1) : s2);
+      };
+      r.onerror = function () { ablehnen(new Error('Datei konnte nicht gelesen werden.')); };
+      r.readAsDataURL(blob);
+    });
+  }
+
+  /**
+   * Sichert einen Blob unter dem gewünschten Namen.
+   * @returns {Promise<{ok:boolean, pfad:string|null, fehler:string|null}>}
+   */
+  async function sichereDatei(blob, name, zweck) {
+    var fs = dateiPlugin();
+    if (!fs) {
+      // Browser: der gewohnte Weg funktioniert hier.
+      try {
+        var a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = name;
+        a.click();
+        setTimeout(function () { URL.revokeObjectURL(a.href); }, 8000);
+        return { ok: true, pfad: name, fehler: null };
+      } catch (e) {
+        return { ok: false, pfad: null, fehler: e.message };
+      }
+    }
+
+    toast('Sichere ' + (zweck || 'Datei') + ' …', 20000);
+    try {
+      var daten = await alsBase64(blob);
+      var ordner = 'ForensikVision';
+      var erg = await fs.writeFile({
+        path: ordner + '/' + name,
+        data: daten,
+        directory: 'DOCUMENTS',
+        recursive: true
+      });
+      var pfad = (erg && erg.uri) ? decodeURIComponent(String(erg.uri).replace(/^file:\/\//, ''))
+                                  : 'Dokumente/' + ordner + '/' + name;
+      toast('Gesichert: Dokumente/' + ordner + '/' + name, 6000);
+      log('export', (zweck || 'Datei') + ' gesichert', pfad);
+      return { ok: true, pfad: pfad, fehler: null };
+    } catch (e) {
+      var m = (e && e.message) ? e.message : String(e);
+      toast('Sichern fehlgeschlagen: ' + m, 7000);
+      log('fehler', 'Sichern fehlgeschlagen', m);
+      return { ok: false, pfad: null, fehler: m };
+    }
+  }
+
+  // Fuer den Browsertest erreichbar machen.
+  window.__sichereDatei = sichereDatei;
 
   function berichtText() {
     var z = ['FORENSIK VISION — VORGANGSPROTOKOLL',
@@ -1381,13 +1467,7 @@
     if (!html) { toast('Erst ein Bild analysieren.'); return; }
     var name = (S.bericht.dateiname || 'bild').replace(/\.[^.]+$/, '');
     var b = new Blob([html], { type: 'text/html;charset=utf-8' });
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(b);
-    a.download = 'analysebericht-' + name + '-' + Date.now() + '.html';
-    a.click();
-    setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
-    log('bericht', 'Analysebericht gesichert', a.download);
-    toast('Bericht gesichert. Im Browser öffnen und bei Bedarf als PDF drucken.');
+    sichereDatei(b, 'analysebericht-' + name + '-' + Date.now() + '.html', 'Bericht');
   }
 
   /* ====================================================== Ghost-Analyse */
@@ -1723,12 +1803,7 @@
       rezept: $('skriptCode').value,
       ergebnisse: skriptErgebnisse
     }, null, 2)], { type: 'application/json' });
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(b);
-    a.download = 'rezept-ergebnis-' + Date.now() + '.json';
-    a.click();
-    setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
-    log('skript', 'Rezept-Ergebnis gesichert', a.download);
+    sichereDatei(b, 'rezept-ergebnis-' + Date.now() + '.json', 'Rezept-Ergebnis');
   }
 
   function verdrahteSkripte() {
@@ -1913,6 +1988,14 @@
       beendeAufnahme();
     };
 
+    // Vordergrunddienst VOR dem Start: sonst kann Android den Vorgang
+    // beenden, sobald die App aus dem Blick geraet.
+    var sp = schirmPlugin();
+    if (sp && sp.startRecordingService) {
+      try { await sp.startRecordingService({ typ: S.quelle === 'bildschirm' ? 'bildschirm' : 'kamera' }); }
+      catch (e) { log('warnung', 'Aufnahmedienst nicht gestartet', e.message || String(e)); }
+    }
+
     rec.recorder.start(1000);
     rec.laeuft = true;
     rec.start = performance.now();
@@ -1944,6 +2027,8 @@
     clearInterval(rec.uhr);
     try { if (rec.recorder && rec.recorder.state !== 'inactive') rec.recorder.stop(); } catch (e) {}
     try { if (rec.strom) rec.strom.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+    var sp2 = schirmPlugin();
+    if (sp2 && sp2.stopRecordingService) { try { sp2.stopRecordingService(); } catch (e) {} }
     ereignis('stopp', 'Aufnahme beendet', zeitText(rec.dauer));
     $('recBtn').textContent = 'Aufnahme';
     $('recBtn').classList.add('btn--danger');
@@ -1977,14 +2062,12 @@
     if (spur && spur.requestFrame) spur.requestFrame();
   }
 
-  function sichereVideo() {
-    if (!rec.blob) return;
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(rec.blob);
-    a.download = 'aufnahme-' + new Date().toISOString().replace(/[:.]/g, '-') + '.webm';
-    a.click();
-    setTimeout(function () { URL.revokeObjectURL(a.href); }, 8000);
-    log('aufnahme', 'Video gesichert', a.download);
+  async function sichereVideo() {
+    if (!rec.blob) { toast('Noch keine Aufnahme vorhanden.'); return; }
+    var name = 'aufnahme-' + new Date().toISOString().replace(/[:.]/g, '-') + '.webm';
+    $('recSaveBtn').disabled = true;
+    await sichereDatei(rec.blob, name, 'Video');
+    $('recSaveBtn').disabled = false;
   }
 
   function sichereZeitleiste() {
@@ -2000,12 +2083,8 @@
       ereignisse: rec.ereignisse
     };
     var bl = new Blob([JSON.stringify(daten, null, 2)], { type: 'application/json' });
-    var a = document.createElement('a');
-    a.href = URL.createObjectURL(bl);
-    a.download = 'zeitleiste-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json';
-    a.click();
-    setTimeout(function () { URL.revokeObjectURL(a.href); }, 8000);
-    log('aufnahme', 'Zeitleiste gesichert', rec.ereignisse.length + ' Ereignisse');
+    sichereDatei(bl, 'zeitleiste-' + new Date().toISOString().replace(/[:.]/g, '-') + '.json',
+                 'Zeitleiste');
   }
 
   function renderSpuren(spuren) {
@@ -2154,11 +2233,7 @@
     $('jsonLogBtn').addEventListener('click', function () {
       var b = new Blob([JSON.stringify({ erzeugtAm: new Date().toISOString(), eintraege: S.log }, null, 2)],
                        { type: 'application/json' });
-      var a = document.createElement('a');
-      a.href = URL.createObjectURL(b);
-      a.download = 'forensik-protokoll-' + Date.now() + '.json';
-      a.click();
-      setTimeout(function () { URL.revokeObjectURL(a.href); }, 4000);
+      sichereDatei(b, 'forensik-protokoll-' + Date.now() + '.json', 'Protokoll');
     });
     $('clearLogBtn').addEventListener('click', function () { S.log = []; renderLog(); });
 
@@ -2195,6 +2270,13 @@
     });
 
     document.addEventListener('visibilitychange', function () {
+      if (document.hidden && rec.laeuft) {
+        // Aufnahme laeuft: weiterarbeiten. Der Vordergrunddienst haelt den
+        // Vorgang am Leben, der Planer wechselt auf setTimeout.
+        log('aufnahme', 'Aufnahme läuft im Hintergrund weiter',
+          'Die Benachrichtigung zeigt es an');
+        return;
+      }
       if (document.hidden && S.running) {
         S.running = false;
         S.warPausiert = true;
@@ -2204,7 +2286,7 @@
         // Das ist der groesste einzelne Posten, und genau in dieser Lage
         // beendet Android Anwendungen wegen Speichermangel.
         S.freigabeUhr = setTimeout(function () {
-          if (!document.hidden || !S.detectorReady) return;
+          if (!document.hidden || !S.detectorReady || rec.laeuft) return;
           try { window.Detector.dispose(); } catch (e) {}
           S.detectorReady = false;
           S.detectorMode = null;

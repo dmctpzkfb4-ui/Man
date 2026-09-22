@@ -25,6 +25,11 @@
         </activity>
 
         <service
+            android:name=".AufnahmeService"
+            android:exported="false"
+            android:foregroundServiceType="camera|mediaProjection" />
+
+        <service
             android:name=".ScreenCaptureService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection" />
@@ -48,6 +53,9 @@
     <!-- Bildschirmaufnahme: ab Android 14 nur mit laufendem Vordergrunddienst erlaubt -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- Kamera im Hintergrund weiternutzen: ab Android 11 nur mit einem
+         Vordergrunddienst vom Typ camera erlaubt -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Kamera ist nicht Pflicht: die Analyse-Funktionen laufen auch ohne -->

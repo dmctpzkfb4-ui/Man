@@ -209,6 +209,23 @@ public class ScreenCapturePlugin extends Plugin {
         }
     }
 
+    /** Haelt den Vorgang waehrend einer Aufnahme am Leben. */
+    @PluginMethod
+    public void startRecordingService(PluginCall call) {
+        try {
+            AufnahmeService.starten(getContext(), call.getString("typ", "kamera"));
+            call.resolve();
+        } catch (Throwable t) {
+            call.reject("Aufnahmedienst ließ sich nicht starten: " + t.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void stopRecordingService(PluginCall call) {
+        try { AufnahmeService.beenden(getContext()); } catch (Throwable t) { /* egal */ }
+        call.resolve();
+    }
+
     @PluginMethod
     public void stop(PluginCall call) {
         freigeben();
