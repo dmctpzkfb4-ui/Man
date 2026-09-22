@@ -60,7 +60,13 @@ async function createSession(modelUrl, prefer) {
   // Reihenfolge der Versuche. WebGPU nur, wenn der Adapter wirklich kommt -
   // das blosse Vorhandensein von navigator.gpu sagt nichts.
   var order = [];
-  if (prefer === 'webgpu' && typeof navigator !== 'undefined' && navigator.gpu) {
+  // Das mitgelieferte Bundle ist der reine WASM-Build. Fragt man es nach
+  // WebGPU, versucht es die jsep-Laufzeit nachzuladen, die es hier nicht
+  // gibt - und meldet dann "no available backend found". Deshalb wird
+  // WebGPU nur erwogen, wenn die Laufzeit es ueberhaupt mitbringt.
+  var kannWebgpu = typeof self.ort !== 'undefined' && !!(self.ort.webgpu ||
+    (self.ort.env && self.ort.env.webgpu && self.ort.env.webgpu.adapter !== undefined));
+  if (prefer === 'webgpu' && kannWebgpu && typeof navigator !== 'undefined' && navigator.gpu) {
     var adapter = null;
     try { adapter = await navigator.gpu.requestAdapter(); } catch (err) { adapter = null; }
     if (adapter) order.push('webgpu');

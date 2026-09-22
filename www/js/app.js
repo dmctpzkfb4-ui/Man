@@ -7,6 +7,9 @@
 (function () {
   'use strict';
 
+  var FASSUNG = "2.1";
+  var STAND = "2026-09-22 04:16";
+
   var $ = function (id) { return document.getElementById(id); };
   var LIVE_MODEL = { url: 'models/model-320.onnx', size: 320 };
   var STILL_MODEL = { url: 'models/model.onnx', size: 640 };
@@ -185,7 +188,8 @@
     S.detectorReady = true;
     S.detectorMode = modus;
     $('mBackend').textContent = info.backend;
-    $('brandSub').textContent = info.backend.toUpperCase() + ' · ' + m.size + ' px · ' + S.labels.length + ' Klassen';
+    $('brandSub').textContent = 'v' + FASSUNG + ' · ' + info.backend.toUpperCase() +
+      ' · ' + m.size + ' px · ' + S.labels.length + ' Klassen';
     log('modell', 'Modell geladen', m.url + ' · Backend ' + info.backend + ' · Ausgabe ' + JSON.stringify(info.outputShape));
     return info;
   }
@@ -1788,6 +1792,7 @@
   async function start() {
     verdrahte();
     go('live');
+    log('start', 'Forensik Vision ' + FASSUNG + ' gestartet', 'Stand ' + STAND);
     renderLog();
     markiereQuelle();
     $('confVal').textContent = num(S.conf, 2);
@@ -1803,8 +1808,9 @@
       await initDetector('live');
     } catch (err) {
       S.detectorReady = false;
-      $('brandSub').textContent = 'Erkennung nicht verfügbar';
-      notice('crit', 'Objekterkennung nicht verfügbar', err.message +
+      $('brandSub').textContent = 'v' + FASSUNG + ' · Erkennung nicht verfügbar';
+      notice('crit', 'Objekterkennung nicht verfügbar',
+        'Fassung ' + FASSUNG + ' (' + STAND + '). ' + err.message +
         ' Die forensische Analyse einzelner Bilder funktioniert davon unabhängig weiter.');
       log('fehler', 'Erkennung konnte nicht starten', err.message);
     }

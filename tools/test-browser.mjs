@@ -52,6 +52,38 @@ seite.on('pageerror', e => konsole.push('pageerror: ' + e.message));
 seite.on('requestfailed', r => netzFehler.push(r.url() + ' — ' + (r.failure()?.errorText || '')));
 seite.on('response', r => { if (r.status() >= 400) netzFehler.push(r.status() + ' ' + r.url()); });
 
+/* ---------- Bündel und Laufzeitdateien müssen zusammenpassen ----------
+ * Genau das ging zweimal schief: ein Bündel wurde mit den Laufzeitdateien
+ * eines anderen ausgeliefert. Das Bündel baut den Dateinamen als festen
+ * String - er lässt sich also vor dem Start prüfen. */
+console.log('[Auslieferung]');
+{
+  const vendor = join(WWW, 'vendor');
+  const dateien = (await import('node:fs/promises')).readdir
+    ? await (await import('node:fs/promises')).readdir(vendor) : [];
+  const bundleName = dateien.find(f => /^ort\..*\.min\.js$/.test(f) || f === 'ort.min.js');
+  t('genau ein ORT-Bündel liegt bei',
+    dateien.filter(f => /^ort\.[a-z.]*min\.js$/.test(f)).length === 1, dateien.join(','));
+
+  const bundle = await readFile(join(vendor, bundleName), 'utf8');
+  // Der Dateiname steht als Zeichenkette im Bündel.
+  const verlangt = [...bundle.matchAll(/"(ort-wasm[a-z0-9.-]*\.mjs)"/g)].map(m => m[1]);
+  const einzig = [...new Set(verlangt)];
+  t('das Bündel verlangt genau eine Laufzeitdatei', einzig.length === 1, einzig.join(','));
+  t(`verlangte Datei "${einzig[0]}" liegt bei`, dateien.includes(einzig[0]),
+    'vorhanden: ' + dateien.join(', '));
+  const wasm = einzig[0]?.replace(/\.mjs$/, '.wasm');
+  t(`zugehörige "${wasm}" liegt bei`, dateien.includes(wasm), dateien.join(', '));
+
+  const html = await readFile(join(WWW, 'index.html'), 'utf8');
+  t('die Seite bindet genau dieses Bündel ein',
+    html.includes(`src="vendor/${bundleName}"`), bundleName);
+  const appJs = await readFile(join(WWW, 'js/app.js'), 'utf8');
+  t('der Worker bekommt dasselbe Bündel',
+    appJs.includes(`ortUrl: 'vendor/${bundleName}'`), bundleName);
+  console.log(`    Bündel ${bundleName} -> ${einzig[0]} + ${wasm}`);
+}
+
 console.log('[Seite laden]');
 await seite.goto(`http://127.0.0.1:${PORT}/`, { waitUntil: 'networkidle', timeout: 60000 });
 t('Seite lädt ohne fehlgeschlagene Anfragen', netzFehler.length === 0, netzFehler.join(' | '));
