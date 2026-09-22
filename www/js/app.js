@@ -1192,6 +1192,265 @@
     ctx.fillText(lab, Math.min(padL + bw - 14, Math.max(padL, mx - 6)), padT + bh + 5);
   }
 
+  /* ============================================================== Skripte */
+
+  var WERKZEUGE = [
+    ['hash()',          'SHA-256, SHA-1, Bytegröße'],
+    ['metadaten()',     'EXIF, GPS, Tags, Befunde'],
+    ['quantTabellen()', 'JPEG-Qualität und Urheber'],
+    ['ela()',           'Fehlerniveau: meanError, maxError'],
+    ['rauschen()',      'Rauschrest: uniformity'],
+    ['copyMove()',      'verdächtige Blöcke'],
+    ['blockraster()',   'Gitterversatz, Verlässlichkeit'],
+    ['ghosts()',        'Einbruchs-Qualität (langsam)'],
+    ['phash()',         'aHash, dHash, pHash'],
+    ['histogramm()',    'beschnittene Tiefen und Lichter'],
+    ['erkenne({conf})', 'Objekterkennung'],
+    ['abstand(a, b)',   'Hamming-Abstand zweier Hashes'],
+    ['markiere(stufe, text)', 'Befund festhalten'],
+    ['setze(feld, wert)',     'Wert in die Ergebnistabelle'],
+    ['notiz(text)',           'freie Zeile']
+  ];
+
+  var VORLAGEN = {
+    schnell:
+'// Schnellprüfung: Identität und offensichtliche Auffälligkeiten.\n' +
+'const h = await werkzeuge.hash();\n' +
+'const m = await werkzeuge.metadaten();\n' +
+'\n' +
+'werkzeuge.setze("SHA-256", h.sha256);\n' +
+'werkzeuge.setze("Größe", (h.bytes / 1024).toFixed(1) + " KB");\n' +
+'werkzeuge.setze("Format", m.format);\n' +
+'werkzeuge.setze("Maße", m.breite + "×" + m.hoehe);\n' +
+'\n' +
+'// Die Befunde des Moduls übernehmen, aber nur die ernsten.\n' +
+'for (const b of m.befunde) {\n' +
+'  if (b.level !== "info") werkzeuge.markiere(b.level, b.text);\n' +
+'}\n' +
+'if (m.gps) werkzeuge.markiere("warn", "Standortdaten enthalten: " + m.gps.lat + ", " + m.gps.lon);\n',
+
+    manipulation:
+'// Bewertet mehrere Verfahren gemeinsam und bildet eine Gesamtzahl.\n' +
+'// Wichtig: keines dieser Verfahren beweist etwas allein.\n' +
+'let punkte = 0;\n' +
+'const gruende = [];\n' +
+'\n' +
+'const ela = await werkzeuge.ela();\n' +
+'if (!ela.error && ela.meanError > 12) { punkte += 2; gruende.push("hohes Fehlerniveau (" + ela.meanError + ")"); }\n' +
+'werkzeuge.setze("ELA-Mittel", ela.meanError);\n' +
+'\n' +
+'const r = await werkzeuge.rauschen();\n' +
+'if (!r.error && r.uniformity < 0.35) { punkte += 2; gruende.push("ungleiches Rauschen (" + r.uniformity + ")"); }\n' +
+'werkzeuge.setze("Rausch-Gleichmäßigkeit", r.uniformity);\n' +
+'\n' +
+'const cm = await werkzeuge.copyMove();\n' +
+'if (!cm.error && cm.suspectBlocks > 6) { punkte += 2; gruende.push(cm.suspectBlocks + " gleichende Blöcke"); }\n' +
+'werkzeuge.setze("Copy-Move-Blöcke", cm.suspectBlocks);\n' +
+'\n' +
+'const bag = await werkzeuge.blockraster();\n' +
+'werkzeuge.setze("Blockraster", bag.verlaesslich ? "(" + bag.offsetX + "," + bag.offsetY + ")" : "nicht messbar");\n' +
+'if (bag.verlaesslich && (bag.offsetX || bag.offsetY)) {\n' +
+'  punkte += 3; gruende.push("Gitter versetzt - Hinweis auf Beschnitt");\n' +
+'}\n' +
+'if (bag.mismatchTiles > 2) { punkte += 3; gruende.push(bag.mismatchTiles + " Kacheln mit fremdem Gitter"); }\n' +
+'\n' +
+'werkzeuge.setze("Punkte", punkte + " von 12");\n' +
+'if (punkte >= 6)      werkzeuge.markiere("alarm", "Mehrere Verfahren schlagen an: " + gruende.join("; "));\n' +
+'else if (punkte >= 3) werkzeuge.markiere("warn",  "Einzelne Auffälligkeiten: " + gruende.join("; "));\n' +
+'else                  werkzeuge.markiere("info",  "Keines der Verfahren schlägt deutlich an.");\n',
+
+    herkunft:
+'// Kam die Datei aus einer Kamera oder aus einem Programm?\n' +
+'const m = await werkzeuge.metadaten();\n' +
+'const q = await werkzeuge.quantTabellen();\n' +
+'\n' +
+'werkzeuge.setze("Hersteller", m.tags["Hersteller"] || "—");\n' +
+'werkzeuge.setze("Modell", m.tags["Kameramodell"] || "—");\n' +
+'werkzeuge.setze("Software", m.tags["Software"] || "—");\n' +
+'werkzeuge.setze("JPEG-Qualität", q.quality ?? "—");\n' +
+'werkzeuge.setze("Tabellen", q.urheber);\n' +
+'\n' +
+'const hatKamera = !!(m.tags["Hersteller"] || m.tags["Kameramodell"]);\n' +
+'if (q.standard && hatKamera) {\n' +
+'  werkzeuge.markiere("alarm",\n' +
+'    "Widerspruch: EXIF nennt eine Kamera, die Quantisierungstabellen sind aber die der " +\n' +
+'    "Standardbibliothek. Die Datei wurde nach der Aufnahme neu kodiert.");\n' +
+'} else if (q.standard) {\n' +
+'  werkzeuge.markiere("warn", "Standardtabellen: von einem Programm geschrieben, nicht direkt aufgenommen.");\n' +
+'} else if (q.quality) {\n' +
+'  werkzeuge.markiere("info", "Gerätespezifische Tabellen - spricht für einen Kamera-Kodierer.");\n' +
+'}\n' +
+'if (!m.hatVorschaubild && hatKamera) {\n' +
+'  werkzeuge.markiere("warn", "Kamera-EXIF ohne eingebettetes Vorschaubild.");\n' +
+'}\n',
+
+    dubletten:
+'// Zeigt an, welche Bilder DENSELBEN Inhalt haben, auch wenn ihre\n' +
+'// Prüfsummen verschieden sind. Die Ausgabe je Bild vergleichst du danach.\n' +
+'const h = await werkzeuge.hash();\n' +
+'const p = await werkzeuge.phash();\n' +
+'\n' +
+'werkzeuge.setze("SHA-256", h.sha256.slice(0, 16) + "…");\n' +
+'werkzeuge.setze("pHash", p.pHash);\n' +
+'werkzeuge.setze("dHash", p.dHash);\n' +
+'\n' +
+'// Gib den pHash zurück - er steht dann in der Zusammenfassung.\n' +
+'return { pHash: p.pHash, sha256: h.sha256 };\n',
+
+    objekte:
+'// Zählt erkannte Objekte je Bild. Setzt voraus, dass die Erkennung läuft.\n' +
+'const hits = await werkzeuge.erkenne({ conf: 0.35 });\n' +
+'const zaehl = {};\n' +
+'for (const d of hits) zaehl[d.label] = (zaehl[d.label] || 0) + 1;\n' +
+'\n' +
+'werkzeuge.setze("Objekte gesamt", hits.length);\n' +
+'for (const [name, n] of Object.entries(zaehl).sort((a, b) => b[1] - a[1])) {\n' +
+'  werkzeuge.setze(name, n);\n' +
+'}\n' +
+'if (zaehl["person"]) werkzeuge.markiere("warn", zaehl["person"] + " Person(en) im Bild - vor Weitergabe bedenken.");\n' +
+'if (!hits.length) werkzeuge.markiere("info", "Nichts über der Schwelle erkannt.");\n'
+  };
+
+  var skriptDateien = [], skriptErgebnisse = [];
+
+  function baueWerkzeugListe() {
+    var box = $('werkzeugListe');
+    box.textContent = '';
+    WERKZEUGE.forEach(function (w) {
+      var d = document.createElement('div');
+      d.className = 'wz-zeile';
+      d.innerHTML = '<span class="wz-name"></span><span class="wz-was"></span>';
+      d.querySelector('.wz-name').textContent = w[0];
+      d.querySelector('.wz-was').textContent = w[1];
+      box.appendChild(d);
+    });
+  }
+
+  function zeigeSkriptErgebnis(r) {
+    var box = $('skriptErgebnisse');
+    var d = document.createElement('div');
+    d.className = 'erg';
+    var kopf = document.createElement('div');
+    kopf.className = 'erg-kopf';
+    kopf.innerHTML = '<span class="erg-datei"></span><span class="erg-status"></span>';
+    kopf.querySelector('.erg-datei').textContent = r.datei || 'unbenannt';
+    var st = kopf.querySelector('.erg-status');
+    st.textContent = r.ok ? 'ok' : 'Fehler';
+    st.setAttribute('data-ok', String(!!r.ok));
+    d.appendChild(kopf);
+
+    if (!r.ok && r.fehler) {
+      var f = document.createElement('div');
+      f.className = 'finding';
+      f.setAttribute('data-level', 'crit');
+      f.innerHTML = '<span class="finding-mark"></span><span class="finding-text"></span>';
+      f.querySelector('.finding-text').textContent = r.fehler;
+      d.appendChild(f);
+    }
+    Object.keys(r.felder || {}).forEach(function (k) {
+      var z = document.createElement('div');
+      z.className = 'erg-feld';
+      z.innerHTML = '<span class="k"></span><span class="v"></span>';
+      z.querySelector('.k').textContent = k;
+      z.querySelector('.v').textContent = r.felder[k];
+      d.appendChild(z);
+    });
+    (r.befunde || []).forEach(function (b) {
+      var f2 = document.createElement('div');
+      f2.className = 'finding';
+      f2.setAttribute('data-level', b.level === 'alarm' ? 'crit' : b.level);
+      f2.innerHTML = '<span class="finding-mark"></span><span class="finding-text"></span>';
+      f2.querySelector('.finding-text').textContent = b.text;
+      d.appendChild(f2);
+    });
+    (r.notizen || []).forEach(function (n) {
+      var z2 = document.createElement('div');
+      z2.className = 'erg-notiz';
+      z2.textContent = n;
+      d.appendChild(z2);
+    });
+    box.appendChild(d);
+  }
+
+  async function fuehreSkriptAus() {
+    var code = $('skriptCode').value.trim();
+    if (!code) { toast('Kein Rezept eingetragen.'); return; }
+    if (!skriptDateien.length) { toast('Erst Bilder wählen.'); return; }
+    if (!window.Skripte) { toast('Das Skript-Modul ist nicht geladen.'); return; }
+
+    $('skriptLaufBtn').disabled = true;
+    $('skriptExportBtn').disabled = true;
+    $('skriptErgebnisPanel').hidden = false;
+    $('skriptErgebnisse').textContent = '';
+    $('skriptProgress').hidden = false;
+    skriptErgebnisse = [];
+
+    log('skript', 'Rezept gestartet', skriptDateien.length + ' Bilder');
+
+    var t0 = performance.now();
+    skriptErgebnisse = await window.Skripte.laufe(code, skriptDateien, {
+      onFortschritt: function (i, n, name) {
+        $('skriptProgressBar').style.width = Math.round(i / n * 100) + '%';
+        $('skriptNote').textContent = (i + 1) + ' von ' + n;
+        ticker('Rezept: ' + name + ' (' + (i + 1) + '/' + n + ')', null, true);
+      },
+      onErgebnis: function (r) { zeigeSkriptErgebnis(r); }
+    });
+
+    var dauer = Math.round((performance.now() - t0) / 100) / 10;
+    var fehler = skriptErgebnisse.filter(function (r) { return !r.ok; }).length;
+    var befunde = skriptErgebnisse.reduce(function (a, r) { return a + (r.befunde || []).length; }, 0);
+
+    $('skriptProgressBar').style.width = '100%';
+    setTimeout(function () { $('skriptProgress').hidden = true; }, 300);
+    $('skriptNote').textContent = skriptErgebnisse.length + ' Bilder · ' + dauer + ' s';
+    $('skriptErgebnisNote').textContent = befunde + ' Befunde' + (fehler ? ' · ' + fehler + ' Fehler' : '');
+    $('skriptLaufBtn').disabled = false;
+    $('skriptExportBtn').disabled = false;
+    log('skript', 'Rezept abgeschlossen',
+      skriptErgebnisse.length + ' Bilder · ' + befunde + ' Befunde · ' + fehler + ' Fehler · ' + dauer + ' s');
+  }
+
+  function sichereSkriptErgebnis() {
+    if (!skriptErgebnisse.length) return;
+    var b = new Blob([JSON.stringify({
+      erzeugtAm: new Date().toISOString(),
+      rezept: $('skriptCode').value,
+      ergebnisse: skriptErgebnisse
+    }, null, 2)], { type: 'application/json' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(b);
+    a.download = 'rezept-ergebnis-' + Date.now() + '.json';
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+    log('skript', 'Rezept-Ergebnis gesichert', a.download);
+  }
+
+  function verdrahteSkripte() {
+    baueWerkzeugListe();
+    $('skriptVorlage').addEventListener('change', function () {
+      if (VORLAGEN[this.value]) {
+        $('skriptCode').value = VORLAGEN[this.value];
+        $('skriptLaufBtn').disabled = !skriptDateien.length;
+      }
+    });
+    $('skriptCode').addEventListener('input', function () {
+      $('skriptLaufBtn').disabled = !(this.value.trim() && skriptDateien.length);
+    });
+    $('skriptDateienBtn').addEventListener('click', function () { $('skriptDateien').click(); });
+    $('skriptDateien').addEventListener('change', function () {
+      skriptDateien = Array.prototype.slice.call(this.files || []);
+      $('skriptDateiNote').textContent = skriptDateien.length
+        ? skriptDateien.length + (skriptDateien.length === 1 ? ' Bild gewählt' : ' Bilder gewählt')
+        : 'Noch keine Bilder gewählt.';
+      $('skriptLaufBtn').disabled = !(skriptDateien.length && $('skriptCode').value.trim());
+    });
+    $('skriptLaufBtn').addEventListener('click', fuehreSkriptAus);
+    $('skriptExportBtn').addEventListener('click', sichereSkriptErgebnis);
+    $('skriptCode').value = VORLAGEN.schnell;
+    $('skriptVorlage').value = 'schnell';
+  }
+
   /* ============================================================== Start */
 
   function verdrahte() {
@@ -1295,6 +1554,7 @@
     $('clearLogBtn').addEventListener('click', function () { S.log = []; renderLog(); });
 
     verdrahteZoom();
+    verdrahteSkripte();
 
     $('compareBtn').addEventListener('click', function () { $('compareInput').click(); });
     $('compareInput').addEventListener('change', function () {

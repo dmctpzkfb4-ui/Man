@@ -225,6 +225,57 @@
         </div>
       </section>
 
+      <!-- =========================== SKRIPTE =========================== -->
+      <section class="view" id="view-skript" data-view="skript">
+        <div class="panel">
+          <div class="panel-head">
+            <h2 class="panel-title">Rezept</h2>
+            <span class="panel-head-note" id="skriptNote">kein Lauf</span>
+          </div>
+          <div class="panel-body panel-body--tight">
+            <div class="field">
+              <select id="skriptVorlage">
+                <option value="">Vorlage wählen …</option>
+                <option value="schnell">Schnellprüfung</option>
+                <option value="manipulation">Manipulationsverdacht bewerten</option>
+                <option value="herkunft">Herkunft bestimmen</option>
+                <option value="dubletten">Dubletten über pHash finden</option>
+                <option value="objekte">Objekte zählen</option>
+              </select>
+            </div>
+            <textarea id="skriptCode" class="code" rows="14" spellcheck="false"
+              placeholder="Eigenes Rezept hier eintragen …"></textarea>
+            <p class="footnote">Das Rezept läuft abgeriegelt: kein Netzzugriff, kein Dateizugriff, kein Zugriff auf die Oberfläche. Es kann Analysen anfordern und deren Ergebnisse bewerten — sonst nichts. Zeitgrenze 45 s je Bild.</p>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2 class="panel-title">Verfügbare Werkzeuge</h2></div>
+          <div class="panel-body panel-body--flush">
+            <div class="kv-group" id="werkzeugListe"></div>
+          </div>
+        </div>
+
+        <div class="btnrow">
+          <button class="btn btn--ghost btn--sm" id="skriptDateienBtn" type="button">Bilder wählen</button>
+          <button class="btn btn--primary btn--sm" id="skriptLaufBtn" type="button" disabled>Rezept ausführen</button>
+          <button class="btn btn--ghost btn--sm" id="skriptExportBtn" type="button" disabled>Ergebnis sichern</button>
+        </div>
+        <input type="file" id="skriptDateien" accept="image/*" multiple hidden>
+        <p class="seg-note" id="skriptDateiNote">Noch keine Bilder gewählt.</p>
+        <div class="progress" id="skriptProgress" hidden><span class="progress-bar" id="skriptProgressBar"></span></div>
+
+        <div class="panel" id="skriptErgebnisPanel" hidden>
+          <div class="panel-head">
+            <h2 class="panel-title">Ergebnisse</h2>
+            <span class="panel-head-note" id="skriptErgebnisNote"></span>
+          </div>
+          <div class="panel-body panel-body--flush">
+            <div id="skriptErgebnisse"></div>
+          </div>
+        </div>
+      </section>
+
       <!-- =========================== PROTOKOLL ========================= -->
       <section class="view" id="view-log" data-view="log">
         <div class="panel">
@@ -258,6 +309,10 @@
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
       <span>Analyse</span>
     </button>
+    <button class="tabbtn" data-go="skript" type="button">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m8 8-4 4 4 4M16 8l4 4-4 4M13.5 5l-3 14"/></svg>
+      <span>Skripte</span>
+    </button>
     <button class="tabbtn" data-go="log" type="button">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 4h14v16H5z"/><path d="M8.5 9h7M8.5 12.5h7M8.5 16h4"/></svg>
       <span>Protokoll</span>
@@ -273,6 +328,7 @@
 <script src="vendor/ort.min.js"></script>
 <script src="js/forensics.js"></script>
 <script src="js/detector.js"></script>
+<script src="js/skripte.js"></script>
 <script src="js/app.js"></script>
 </body>
 </html>

@@ -45,6 +45,10 @@ Nennen die Metadaten eine Kamera, während die Tabellen aus der
 Standardbibliothek stammen, ist das ein Widerspruch: Die Datei wurde neu
 kodiert, die EXIF-Daten aber übernommen. Die App meldet das ausdrücklich.
 
+**Skripte** — eigene Rezepte über einen Stapel Bilder laufen lassen. Fünf
+Vorlagen liegen bei: Schnellprüfung, Manipulationsverdacht bewerten, Herkunft
+bestimmen, Dubletten über pHash finden, Objekte zählen.
+
 **Protokoll** — jeder Vorgang mit Zeitstempel, als Text oder JSON exportierbar.
 
 Befunde sind Hinweise, keine Beweise. Die Texte in der App sagen das auch so:
@@ -99,6 +103,29 @@ Erkennung und werden danach verworfen.
 Aufgenommen wird auf 720 px Breite begrenzt: die Erkennung arbeitet ohnehin
 auf 320 bzw. 640 Pixeln, eine volle Bildschirmauflösung je Bild zu übertragen
 wäre reine Verschwendung.
+
+### Wie Skripte abgeriegelt sind
+
+Ein Rezept ist fremder Code. In einem Werkzeug, dessen ganzer Wert auf
+Vertrauenswürdigkeit beruht, darf so etwas nicht im Hauptthread mit vollen
+Rechten laufen. Deshalb:
+
+- Ausführung in einem eigenen Worker — kein DOM, kein `localStorage`, kein
+  Zugriff auf die Oberfläche.
+- Alles, womit ein Skript nach außen funken könnte, wird beim Start entfernt:
+  `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `importScripts`,
+  `indexedDB`, `caches`, `Worker`.
+- Das Skript bekommt **keine Bilddaten in die Hand**. Es ruft benannte
+  Werkzeuge auf, die der Hauptthread ausführt, und erhält nur deren Ergebnisse
+  als einfache Werte zurück.
+- Ein eigener Worker je Datei. Dadurch lässt sich die Zeitgrenze von 45 s hart
+  durchsetzen (Beenden), und ein Skript kann keinen Zustand von einer Datei zur
+  nächsten schmuggeln.
+- Verarbeitung nacheinander, nicht gleichzeitig: parallele Analysen bringen ein
+  Mobilgerät zum Stocken, und die Reihenfolge bleibt nachvollziehbar.
+
+Ein Rezept kann damit Analysen anstoßen und bewerten — aber nichts lesen, was
+ihm nicht gegeben wurde, und nichts irgendwohin senden.
 
 ## Bauen
 
