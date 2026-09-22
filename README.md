@@ -23,6 +23,25 @@ für Konfidenz und Überlappung einstellbar, Einzelbild festhalten.
 | Rauschrest | retuschierte oder weichgezeichnete Zonen |
 | Copy-Move | Blöcke, die weit entfernten Blöcken gleichen |
 | Histogramm | Tonwertverteilung, beschnittene Tiefen und Lichter |
+| Quantisierungstabellen | Qualitätsstufe und ob Kamera oder Software die Datei schrieb |
+| Wahrnehmungs-Prüfsummen | aHash, dHash, pHash — bleiben bei Skalierung stabil |
+
+Dazu Zoom bis 16-fach mit Ziehen und Aufziehen, ein Klassenfilter für die
+Live-Erkennung, ein Bildvergleich über den pHash-Abstand und ein
+Analysebericht als eigenständige HTML-Datei zum Archivieren oder Drucken.
+
+### Quantisierungstabellen
+
+Beim Speichern eines JPEGs werden die DCT-Koeffizienten durch eine
+8×8-Tabelle geteilt, die in der Datei steht. Die freie Referenzbibliothek
+leitet ihre Tabellen nach einer festen Formel aus zwei Basistabellen ab.
+Trifft eine Datei diese Formel exakt, stammt sie aus gängiger Software.
+Kamerahersteller verwenden eigene Tabellen — ein unberührtes Original passt
+also gerade *nicht*.
+
+Nennen die Metadaten eine Kamera, während die Tabellen aus der
+Standardbibliothek stammen, ist das ein Widerspruch: Die Datei wurde neu
+kodiert, die EXIF-Daten aber übernommen. Die App meldet das ausdrücklich.
 
 **Protokoll** — jeder Vorgang mit Zeitstempel, als Text oder JSON exportierbar.
 

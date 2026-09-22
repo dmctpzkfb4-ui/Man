@@ -82,6 +82,20 @@
 
         <div class="panel">
           <div class="panel-head">
+            <h2 class="panel-title">Klassenfilter</h2>
+            <span class="panel-head-note" id="filterNote">alle</span>
+          </div>
+          <div class="panel-body panel-body--tight">
+            <div class="field">
+              <input type="search" id="classSearch" placeholder="Klasse suchen, z. B. person" autocomplete="off">
+              <button class="btn btn--ghost btn--sm" id="clearFilterBtn" type="button">alle</button>
+            </div>
+            <div class="chips" id="classChips"></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
             <h2 class="panel-title">Erkannte Objekte</h2>
             <span class="panel-head-note" id="hitsNote">–</span>
           </div>
@@ -101,6 +115,12 @@
             <p class="footnote">Oder im Live-Reiter ein Bild festhalten.</p>
           </div>
           <div class="stage-scale" id="analyseScale" hidden></div>
+          <div class="zoombar" id="zoomBar" hidden>
+            <button class="iconbtn" id="zoomOut" type="button" aria-label="Verkleinern">−</button>
+            <span class="zoom-level" id="zoomLevel">100 %</span>
+            <button class="iconbtn" id="zoomIn" type="button" aria-label="Vergrößern">+</button>
+            <button class="iconbtn" id="zoomReset" type="button" aria-label="Zurücksetzen">⤢</button>
+          </div>
         </div>
         <input type="file" id="fileInput" accept="image/*" hidden>
 
@@ -116,7 +136,10 @@
           <button class="btn btn--ghost btn--sm" id="reanalyseBtn" type="button" disabled>Neu analysieren</button>
           <button class="btn btn--ghost btn--sm" id="detectStillBtn" type="button" disabled>Objekte erkennen</button>
           <button class="btn btn--ghost btn--sm" id="otherFileBtn" type="button">Anderes Bild</button>
+          <button class="btn btn--ghost btn--sm" id="compareBtn" type="button" disabled>Mit Bild vergleichen</button>
+          <button class="btn btn--primary btn--sm" id="reportBtn" type="button" disabled>Bericht sichern</button>
         </div>
+        <input type="file" id="compareInput" accept="image/*" hidden>
 
         <div class="progress" id="analyseProgress" hidden><span class="progress-bar" id="analyseProgressBar"></span></div>
 
@@ -129,6 +152,20 @@
             <p class="file-line" id="fileLine"></p>
             <div class="hashes" id="hashes"></div>
             <p class="footnote">Die Prüfsummen belegen, dass die untersuchte Datei unverändert ist. Notiere sie, bevor du die Datei weitergibst.</p>
+          </div>
+        </div>
+
+        <div class="panel" id="phashPanel" hidden>
+          <div class="panel-head">
+            <h2 class="panel-title">Wahrnehmungs-Prüfsummen</h2>
+            <span class="panel-head-note">skalierungsfest</span>
+          </div>
+          <div class="panel-body panel-body--flush">
+            <div class="kv-group" id="phashTable"></div>
+          </div>
+          <div class="panel-body panel-body--tight">
+            <div id="compareResult"></div>
+            <p class="footnote">Diese Prüfsummen bleiben stabil, wenn ein Bild skaliert oder neu komprimiert wird. Damit lässt sich belegen, dass zwei Dateien dasselbe Bild zeigen, obwohl ihre SHA-256 verschieden sind.</p>
           </div>
         </div>
 

@@ -110,5 +110,62 @@ t('Tiefenbeschnitt erkannt', hist.clippedLow === 1);
 t('Höhenbeschnitt erkannt', hist.clippedHigh === 2);
 t('Gesamtzahl', hist.total === 4);
 
+/* ---------- 9. Quantisierungstabellen ---------- */
+console.log('\n[JPEG-Quantisierungstabellen]');
+// Bei Qualitaet 50 ist der Skalierungsfaktor genau 100 - die Tabelle muss
+// also unveraendert der Basistabelle entsprechen.
+const s50 = I.ijgScale(I.IJG_LUMA, 50);
+t('Qualität 50 = Basistabelle', s50.every((v, i) => v === I.IJG_LUMA[i]));
+// Bei Qualitaet 100 wird der Faktor 0, alle Werte fallen auf das Minimum 1.
+t('Qualität 100 = alle Werte 1', I.ijgScale(I.IJG_LUMA, 100).every(v => v === 1));
+t('Qualität 1 klemmt bei 255', I.ijgScale(I.IJG_LUMA, 1).every(v => v >= 1 && v <= 255));
+t('höhere Qualität = kleinere Werte',
+  I.ijgScale(I.IJG_LUMA, 90).reduce((a,b)=>a+b,0) < I.ijgScale(I.IJG_LUMA, 30).reduce((a,b)=>a+b,0));
+
+// Zickzack: Position 0,1,8,16 der natuerlichen Reihenfolge
+const zz = I.deZigzag(Array.from({length:64},(_,i)=>i));
+t('Zickzack Position 0', zz[0] === 0);
+t('Zickzack Position 1', zz[1] === 1);
+t('Zickzack Position 8', zz[8] === 2, zz[8]);
+t('Zickzack ist Permutation', new Set(zz).size === 64);
+
+const m = I.matchIjgQuality(I.ijgScale(I.IJG_LUMA, 77), I.IJG_LUMA);
+t('erkennt konstruierte Qualität 77 exakt', m.quality === 77 && m.deviation === 0,
+  `q=${m.quality} abw=${m.deviation}`);
+
+// Echte Datei: bus.jpg traegt exakte Standardtabellen
+const sc = I._ ? null : I.scanJpeg(new Uint8Array(buf));
+const qa = F.analyseQuantTables(sc.quantTables);
+t('zwei Tabellen gelesen', qa.tables.length === 2, qa.tables.length);
+t('als Standardbibliothek erkannt', qa.standard === true);
+t('Qualität bestimmt', qa.quality === 50, qa.quality);
+t('Befund erzeugt', qa.findings.length > 0);
+t('leere Eingabe stürzt nicht ab', F.analyseQuantTables(null).tables.length === 0);
+t('Müll stürzt nicht ab', F.analyseQuantTables([{id:0,values:[1,2]}]).tables.length === 0);
+
+/* ---------- 10. Perzeptuelle Prüfsummen ---------- */
+console.log('\n[Perzeptuelle Prüfsummen]');
+// Gleichfoermiges Raster: DCT muss alle Energie im Gleichanteil buendeln.
+const konst = new Float64Array(64).fill(128);
+const dctKonst = I.dct2d(konst, 8);
+t('DCT einer konstanten Fläche: nur Gleichanteil', Math.abs(dctKonst[0]) > 100 &&
+  dctKonst.slice(1).every(v => Math.abs(v) < 1e-9), dctKonst[0].toFixed(1));
+
+t('Bitfolge zu Hex', I.bitsToHex([1,0,1,0, 1,1,1,1]) === 'af', I.bitsToHex([1,0,1,0,1,1,1,1]));
+
+// Verlauf: linke Haelfte dunkel, rechte hell -> dHash muss Struktur zeigen
+const verlauf = new Float64Array(64);
+for (let y=0;y<8;y++) for (let x=0;x<8;x++) verlauf[y*8+x] = x*30;
+const a1 = I.averageHashFrom(verlauf, 8);
+t('aHash eines Verlaufs ist nicht konstant', /[^0]/.test(a1) && /[^f]/.test(a1), a1);
+t('aHash einer gleichförmigen Fläche = 0', I.averageHashFrom(konst, 8) === '0000000000000000',
+  I.averageHashFrom(konst, 8));
+
+t('Hamming: identisch = 0', F.hammingDistance('abcd','abcd') === 0);
+t('Hamming: ein Bit', F.hammingDistance('0','1') === 1);
+t('Hamming: vier Bit', F.hammingDistance('0','f') === 4);
+t('Hamming: verschiedene Länge = -1', F.hammingDistance('ab','abc') === -1);
+t('Hamming: kein String = -1', F.hammingDistance(null,'ab') === -1);
+
 console.log(`\n${'='.repeat(46)}\n${ok} bestanden, ${fail} fehlgeschlagen`);
 process.exit(fail ? 1 : 0);

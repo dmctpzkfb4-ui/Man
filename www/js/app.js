@@ -18,6 +18,8 @@
     conf: 0.25, iou: 0.45,
     fpsWindow: [], lastHits: [],
     bild: null, bitmap: null, layers: {}, layer: 'original',
+    bericht: null, filter: null,
+    zoom: 1, panX: 0, panY: 0,
     log: []
   };
 
@@ -209,6 +211,12 @@
     });
   }
 
+  /** Wendet den Klassenfilter an. null bedeutet: alles durchlassen. */
+  function filtere(hits) {
+    if (!S.filter || !S.filter.size) return hits;
+    return hits.filter(function (d) { return S.filter.has(d.classId); });
+  }
+
   function renderHits(hits) {
     var box = $('hitsList');
     $('mHits').textContent = hits.length;
@@ -247,7 +255,8 @@
       S.busy = true;
       var t0 = performance.now();
       try {
-        var hits = await window.Detector.detect(v, { conf: S.conf, iou: S.iou, maxDet: 60 });
+        var roh = await window.Detector.detect(v, { conf: S.conf, iou: S.iou, maxDet: 60 });
+        var hits = filtere(roh);
         S.lastHits = hits;
         zeichne(hits);
         renderHits(hits);
@@ -318,6 +327,8 @@
 
     S.layers = { original: null };
     S.layer = 'original';
+    zoomZurueck();
+    $('zoomBar').hidden = false;
     zeichneLayer();
     document.querySelectorAll('#viewSeg button').forEach(function (b) { b.disabled = false; });
     $('reanalyseBtn').disabled = false;
@@ -388,6 +399,15 @@
     });
     if (!keys.length) $('metaTable').innerHTML = '<p class="empty">Keine Metadaten gefunden.</p>';
 
+    /* --- Wahrnehmungs-Prüfsummen --- */
+    S.bericht = bericht;
+    zeigePHashes(bericht.perzeptuell);
+    $('reportBtn').disabled = false;
+    $('compareResult').textContent = '';
+    if (bericht.perzeptuell && bericht.perzeptuell.pHash) {
+      log('integritaet', 'Wahrnehmungs-Prüfsumme berechnet', 'pHash ' + bericht.perzeptuell.pHash);
+    }
+
     /* --- Histogramm --- */
     if (bericht.histogramm) { $('histPanel').hidden = false; zeichneHistogramm(bericht.histogramm); }
 
@@ -439,6 +459,342 @@
       if (e.detail) z.push('    ' + e.detail);
     });
     return z.join('\n');
+  }
+
+  /* ========================================= Zoom und Verschieben (Analyse)
+   * Forensische Betrachtung ohne Lupe ist sinnlos: ELA-Spuren und
+   * Rauschunterschiede zeigen sich erst in der Vergrößerung.
+   * ====================================================================== */
+
+  var ZOOM_MIN = 1, ZOOM_MAX = 16;
+
+  function wendeZoomAn() {
+    var c = $('analyseCanvas'), stage = $('analyseStage');
+    if (!c) return;
+    // Verschiebung so begrenzen, dass das Bild nie ganz aus dem Rahmen wandert.
+    var bw = stage.clientWidth, bh = stage.clientHeight;
+    var maxX = Math.max(0, bw * (S.zoom - 1));
+    var maxY = Math.max(0, bh * (S.zoom - 1));
+    S.panX = Math.min(0, Math.max(-maxX, S.panX));
+    S.panY = Math.min(0, Math.max(-maxY, S.panY));
+    c.style.transform = 'translate(' + S.panX + 'px,' + S.panY + 'px) scale(' + S.zoom + ')';
+    $('zoomLevel').textContent = Math.round(S.zoom * 100) + ' %';
+    stage.classList.toggle('is-zoomed', S.zoom > 1);
+  }
+
+  /** Zoomt um einen Punkt herum, damit der Punkt unter dem Finger bleibt. */
+  function zoomeUm(faktor, px, py) {
+    var alt = S.zoom;
+    S.zoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, S.zoom * faktor));
+    if (S.zoom === alt) return;
+    var v = S.zoom / alt;
+    S.panX = px - (px - S.panX) * v;
+    S.panY = py - (py - S.panY) * v;
+    if (S.zoom === 1) { S.panX = 0; S.panY = 0; }
+    wendeZoomAn();
+  }
+
+  function zoomZurueck() { S.zoom = 1; S.panX = 0; S.panY = 0; wendeZoomAn(); }
+
+  function verdrahteZoom() {
+    var stage = $('analyseStage');
+    var zeiger = new Map();
+    var startAbstand = 0, startZoom = 1, letzterX = 0, letzterY = 0;
+
+    function lokal(e) {
+      var r = stage.getBoundingClientRect();
+      return { x: e.clientX - r.left, y: e.clientY - r.top };
+    }
+
+    stage.addEventListener('pointerdown', function (e) {
+      if (!S.bitmap) return;
+      stage.setPointerCapture(e.pointerId);
+      zeiger.set(e.pointerId, lokal(e));
+      if (zeiger.size === 2) {
+        var p = Array.from(zeiger.values());
+        startAbstand = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+        startZoom = S.zoom;
+      } else {
+        var l = lokal(e); letzterX = l.x; letzterY = l.y;
+        stage.classList.add('is-panning');
+      }
+    });
+
+    stage.addEventListener('pointermove', function (e) {
+      if (!zeiger.has(e.pointerId)) return;
+      zeiger.set(e.pointerId, lokal(e));
+      if (zeiger.size === 2 && startAbstand > 0) {
+        var p = Array.from(zeiger.values());
+        var abstand = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+        var mitteX = (p[0].x + p[1].x) / 2, mitteY = (p[0].y + p[1].y) / 2;
+        var ziel = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, startZoom * (abstand / startAbstand)));
+        zoomeUm(ziel / S.zoom, mitteX, mitteY);
+      } else if (zeiger.size === 1 && S.zoom > 1) {
+        var l = lokal(e);
+        S.panX += l.x - letzterX; S.panY += l.y - letzterY;
+        letzterX = l.x; letzterY = l.y;
+        wendeZoomAn();
+      }
+    });
+
+    function ende(e) {
+      zeiger.delete(e.pointerId);
+      if (zeiger.size < 2) startAbstand = 0;
+      if (!zeiger.size) stage.classList.remove('is-panning');
+    }
+    stage.addEventListener('pointerup', ende);
+    stage.addEventListener('pointercancel', ende);
+
+    stage.addEventListener('wheel', function (e) {
+      if (!S.bitmap) return;
+      e.preventDefault();
+      var l = lokal(e);
+      zoomeUm(e.deltaY < 0 ? 1.18 : 1 / 1.18, l.x, l.y);
+    }, { passive: false });
+
+    stage.addEventListener('dblclick', function (e) {
+      if (!S.bitmap) return;
+      if (S.zoom > 1) zoomZurueck();
+      else { var l = lokal(e); zoomeUm(4, l.x, l.y); }
+    });
+
+    $('zoomIn').addEventListener('click', function () {
+      var r = stage.getBoundingClientRect(); zoomeUm(1.5, r.width / 2, r.height / 2);
+    });
+    $('zoomOut').addEventListener('click', function () {
+      var r = stage.getBoundingClientRect(); zoomeUm(1 / 1.5, r.width / 2, r.height / 2);
+    });
+    $('zoomReset').addEventListener('click', zoomZurueck);
+  }
+
+  /* ================================================== Klassenfilter (Live) */
+
+  function baueKlassenChips(suche) {
+    var box = $('classChips');
+    box.textContent = '';
+    var q = (suche || '').trim().toLowerCase();
+    var treffer = 0;
+    S.labels.forEach(function (name, id) {
+      if (q && name.toLowerCase().indexOf(q) === -1) return;
+      if (treffer++ > 90) return;
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chip' + (S.filter && S.filter.has(id) ? ' is-on' : '');
+      b.textContent = name;
+      b.addEventListener('click', function () {
+        if (!S.filter) S.filter = new Set();
+        if (S.filter.has(id)) S.filter.delete(id); else S.filter.add(id);
+        if (!S.filter.size) S.filter = null;
+        baueKlassenChips($('classSearch').value);
+        aktualisiereFilterHinweis();
+      });
+      box.appendChild(b);
+    });
+    if (!treffer) box.innerHTML = '<p class="empty">Keine Klasse passt zur Suche.</p>';
+  }
+
+  function aktualisiereFilterHinweis() {
+    $('filterNote').textContent = S.filter && S.filter.size
+      ? S.filter.size + (S.filter.size === 1 ? ' Klasse' : ' Klassen')
+      : 'alle';
+  }
+
+  /* ================================================ Bildvergleich (pHash) */
+
+  function zeigePHashes(p) {
+    if (!p || p.error) { $('phashPanel').hidden = true; return; }
+    $('phashPanel').hidden = false;
+    $('phashTable').textContent = '';
+    [['Mittelwert (aHash)', p.aHash], ['Differenz (dHash)', p.dHash], ['Wahrnehmung (pHash)', p.pHash]]
+      .forEach(function (e) {
+        if (!e[1]) return;
+        var r = document.createElement('div');
+        r.className = 'clip-row';
+        r.innerHTML = '<span class="clip-label"></span><span class="clip-value"></span>';
+        r.querySelector('.clip-label').textContent = e[0];
+        r.querySelector('.clip-value').textContent = e[1];
+        $('phashTable').appendChild(r);
+      });
+    $('compareBtn').disabled = false;
+  }
+
+  async function vergleicheMit(datei) {
+    if (!S.bericht || !S.bericht.perzeptuell) return;
+    var box = $('compareResult');
+    box.innerHTML = '<p class="empty">vergleiche …</p>';
+    var bmp;
+    try { bmp = await createImageBitmap(datei); }
+    catch (e) { box.innerHTML = '<p class="empty">Bild konnte nicht gelesen werden.</p>'; return; }
+
+    var b = await window.Forensics.perceptualHashes(bmp);
+    var h = await window.Forensics.hash(datei);
+    var a = S.bericht.perzeptuell;
+    if (bmp.close) bmp.close();
+
+    // pHash hat 64 Bit. Der Abstand sagt, wie stark sich die Bildinhalte
+    // unterscheiden - nicht, wie stark sich die Dateien unterscheiden.
+    var dP = window.Forensics.hammingDistance(a.pHash, b.pHash);
+    var dD = window.Forensics.hammingDistance(a.dHash, b.dHash);
+    var dA = window.Forensics.hammingDistance(a.aHash, b.aHash);
+    var gleicheDatei = h.sha256 === S.bericht.hash.sha256;
+
+    box.textContent = '';
+    [['Dateiname', datei.name || 'unbenannt'],
+     ['SHA-256 identisch', gleicheDatei ? 'ja' : 'nein'],
+     ['pHash-Abstand', dP + ' von 64 Bit'],
+     ['dHash-Abstand', dD + ' von 64 Bit'],
+     ['aHash-Abstand', dA + ' von 64 Bit']].forEach(function (e) {
+      var r = document.createElement('div');
+      r.className = 'cmp-row';
+      r.innerHTML = '<span class="clip-label"></span><span class="clip-value"></span>';
+      r.querySelector('.clip-label').textContent = e[0];
+      r.querySelector('.clip-value').textContent = e[1];
+      box.appendChild(r);
+    });
+
+    var urteil = document.createElement('div');
+    urteil.className = 'cmp-verdict';
+    if (gleicheDatei) {
+      urteil.setAttribute('data-level', 'ok');
+      urteil.textContent = 'Bit-identische Datei. Die Prüfsummen stimmen überein.';
+    } else if (dP >= 0 && dP <= 6) {
+      urteil.setAttribute('data-level', 'warn');
+      urteil.textContent = 'Sehr ähnliches Bild bei unterschiedlicher Datei. Typisch für dasselbe ' +
+        'Motiv nach Skalierung, erneuter Kompression oder leichter Bearbeitung. Das ist ein starker ' +
+        'Hinweis auf gemeinsame Herkunft, kein Beweis.';
+    } else if (dP >= 0 && dP <= 14) {
+      urteil.setAttribute('data-level', 'warn');
+      urteil.textContent = 'Teilweise ähnlich. Möglich bei stärkerer Bearbeitung oder Ausschnitt ' +
+        'desselben Motivs, aber auch bei zufällig ähnlichem Bildaufbau.';
+    } else {
+      urteil.setAttribute('data-level', 'crit');
+      urteil.textContent = 'Deutlich verschiedene Bildinhalte.';
+    }
+    box.appendChild(urteil);
+
+    log('vergleich', 'Bildvergleich durchgeführt',
+      (datei.name || 'unbenannt') + ' · pHash-Abstand ' + dP + '/64 · SHA-256 ' +
+      (gleicheDatei ? 'identisch' : 'verschieden'));
+  }
+
+  /* ========================================================= Berichtsexport
+   * Erzeugt eine eigenständige HTML-Datei: alle Befunde, Prüfsummen,
+   * Metadaten und die Analysebilder eingebettet. Sie lässt sich archivieren,
+   * weitergeben und im Browser zu PDF drucken - ohne diese App.
+   * ====================================================================== */
+
+  function datenUrlVon(imageData, maxBreite) {
+    if (!imageData) return null;
+    var c = document.createElement('canvas');
+    var f = Math.min(1, (maxBreite || 900) / imageData.width);
+    c.width = Math.round(imageData.width * f);
+    c.height = Math.round(imageData.height * f);
+    var tmp = document.createElement('canvas');
+    tmp.width = imageData.width; tmp.height = imageData.height;
+    tmp.getContext('2d').putImageData(imageData, 0, 0);
+    c.getContext('2d').drawImage(tmp, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.82);
+  }
+
+  function esc(t) {
+    return String(t == null ? '' : t)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function baueBericht() {
+    var b = S.bericht;
+    if (!b) return '';
+    var m = b.metadaten || {};
+    var bilder = [];
+    if (S.bitmap) {
+      var c = document.createElement('canvas');
+      var f = Math.min(1, 900 / S.bitmap.width);
+      c.width = Math.round(S.bitmap.width * f); c.height = Math.round(S.bitmap.height * f);
+      c.getContext('2d').drawImage(S.bitmap, 0, 0, c.width, c.height);
+      bilder.push(['Original', c.toDataURL('image/jpeg', 0.82)]);
+    }
+    if (S.layers.ela) bilder.push(['Fehlerniveau (ELA)', datenUrlVon(S.layers.ela)]);
+    if (S.layers.noise) bilder.push(['Rauschrest', datenUrlVon(S.layers.noise)]);
+    if (S.layers.copymove) bilder.push(['Copy-Move-Hinweis', datenUrlVon(S.layers.copymove)]);
+
+    var zeilen = Object.keys(m.tags || {}).map(function (k) {
+      return '<tr><th>' + esc(k) + '</th><td>' + esc(m.tags[k]) + '</td></tr>';
+    }).join('');
+
+    var befunde = (m.findings || []).map(function (f2) {
+      var stufe = f2.level === 'alarm' ? 'crit' : f2.level;
+      return '<li class="f f-' + stufe + '">' + esc(f2.text) + '</li>';
+    }).join('');
+
+    var ph = b.perzeptuell || {};
+
+    return '<!DOCTYPE html><html lang="de"><head><meta charset="utf-8">' +
+      '<title>Analysebericht — ' + esc(b.dateiname || 'Bild') + '</title><style>' +
+      'body{font:14px/1.6 system-ui,sans-serif;max-width:920px;margin:0 auto;padding:32px 20px;color:#111}' +
+      'h1{font-size:22px;margin:0 0 4px}h2{font-size:15px;margin:30px 0 8px;padding-bottom:5px;border-bottom:1px solid #ddd}' +
+      '.sub{color:#666;font-size:12px;margin:0 0 6px}table{border-collapse:collapse;width:100%;font-size:13px}' +
+      'th,td{text-align:left;padding:6px 8px;border-bottom:1px solid #eee;vertical-align:top}' +
+      'th{width:38%;color:#555;font-weight:600}code{font:12px ui-monospace,monospace;word-break:break-all}' +
+      'ul{padding-left:0;list-style:none}.f{padding:9px 12px;margin:6px 0;border-left:3px solid #999;background:#f7f7f7;border-radius:0 4px 4px 0}' +
+      '.f-crit{border-color:#c0392b;background:#fdf0ee}.f-warn{border-color:#c8951f;background:#fdf8ec}.f-info{border-color:#3a7ca5;background:#eef4f8}' +
+      'figure{margin:16px 0}figure img{width:100%;border:1px solid #ddd;border-radius:4px}' +
+      'figcaption{font-size:12px;color:#666;margin-top:5px}' +
+      '.note{font-size:12px;color:#666;border:1px solid #e0e0e0;padding:12px;border-radius:4px;margin-top:26px}' +
+      '@media print{body{padding:0}h2{break-after:avoid}figure{break-inside:avoid}}' +
+      '</style></head><body>' +
+      '<h1>Forensischer Analysebericht</h1>' +
+      '<p class="sub">Datei: <strong>' + esc(b.dateiname || 'Kamerabild') + '</strong> · ' +
+        'Erstellt: ' + esc(zeit(Date.now())) + ' · Forensik Vision ' + esc(b.version || '') + '</p>' +
+
+      '<h2>Integrität</h2><table>' +
+      '<tr><th>SHA-256</th><td><code>' + esc(b.hash.sha256) + '</code></td></tr>' +
+      '<tr><th>SHA-1</th><td><code>' + esc(b.hash.sha1) + '</code></td></tr>' +
+      '<tr><th>Größe</th><td>' + esc(b.hash.bytes.toLocaleString('de-DE')) + ' Byte</td></tr>' +
+      (b.breite ? '<tr><th>Abmessungen</th><td>' + b.breite + ' × ' + b.hoehe + ' px</td></tr>' : '') +
+      '</table>' +
+
+      (ph.pHash ? '<h2>Wahrnehmungs-Prüfsummen</h2><table>' +
+        '<tr><th>aHash</th><td><code>' + esc(ph.aHash) + '</code></td></tr>' +
+        '<tr><th>dHash</th><td><code>' + esc(ph.dHash) + '</code></td></tr>' +
+        '<tr><th>pHash</th><td><code>' + esc(ph.pHash) + '</code></td></tr></table>' : '') +
+
+      '<h2>Befunde</h2><ul>' + (befunde || '<li class="f f-info">Keine Befunde.</li>') + '</ul>' +
+
+      '<h2>Messwerte</h2><table>' +
+      '<tr><th>ELA — mittlere Abweichung</th><td>' + num(b.ela && b.ela.meanError, 2) + '</td></tr>' +
+      '<tr><th>ELA — größte Abweichung</th><td>' + num(b.ela && b.ela.maxError, 0) + '</td></tr>' +
+      '<tr><th>Rauschen — Gleichmäßigkeit</th><td>' + num(b.rauschen && b.rauschen.uniformity, 3) + '</td></tr>' +
+      '<tr><th>Copy-Move — verdächtige Blöcke</th><td>' + ((b.copyMove && b.copyMove.suspectBlocks) || 0) + '</td></tr>' +
+      (b.histogramm ? '<tr><th>Tiefen beschnitten</th><td>' + num(b.histogramm.clippedLowPct, 2) + ' %</td></tr>' +
+        '<tr><th>Lichter beschnitten</th><td>' + num(b.histogramm.clippedHighPct, 2) + ' %</td></tr>' : '') +
+      '</table>' +
+
+      (zeilen ? '<h2>Metadaten</h2><table>' + zeilen + '</table>' : '<h2>Metadaten</h2><p>Keine gefunden.</p>') +
+
+      '<h2>Ansichten</h2>' + bilder.map(function (p) {
+        return p[1] ? '<figure><img src="' + p[1] + '" alt=""><figcaption>' + esc(p[0]) + '</figcaption></figure>' : '';
+      }).join('') +
+
+      '<p class="note"><strong>Zur Einordnung.</strong> Die hier aufgeführten Befunde sind Hinweise, ' +
+      'keine Beweise. Metadaten lassen sich entfernen und fälschen. Gleichförmige Flächen und ' +
+      'wiederkehrende Muster erzeugen im Copy-Move-Verfahren zwangsläufig Treffer. Ein hohes ' +
+      'Fehlerniveau entsteht auch durch mehrfaches Speichern ohne jede inhaltliche Änderung. ' +
+      'Die Prüfsummen belegen ausschließlich, dass die untersuchte Datei unverändert vorlag.</p>' +
+      '</body></html>';
+  }
+
+  function sichereBericht() {
+    var html = baueBericht();
+    if (!html) { toast('Erst ein Bild analysieren.'); return; }
+    var name = (S.bericht.dateiname || 'bild').replace(/\.[^.]+$/, '');
+    var b = new Blob([html], { type: 'text/html;charset=utf-8' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(b);
+    a.download = 'analysebericht-' + name + '-' + Date.now() + '.html';
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+    log('bericht', 'Analysebericht gesichert', a.download);
+    toast('Bericht gesichert. Im Browser öffnen und bei Bedarf als PDF drucken.');
   }
 
   /* ============================================================== Start */
@@ -498,7 +854,7 @@
       this.disabled = true;
       try {
         if (S.detectorMode !== 'still') await initDetector('still');
-        S.lastHits = await window.Detector.detect(S.bitmap, { conf: S.conf, iou: S.iou, maxDet: 100 });
+        S.lastHits = filtere(await window.Detector.detect(S.bitmap, { conf: S.conf, iou: S.iou, maxDet: 100 }));
         S.layer = 'original'; zeichneLayer();
         log('erkennung', S.lastHits.length + ' Objekte im Standbild erkannt',
           S.lastHits.map(function (d) { return d.label + ' ' + Math.round(d.score * 100) + '%'; }).join(', '));
@@ -529,7 +885,27 @@
     });
     $('clearLogBtn').addEventListener('click', function () { S.log = []; renderLog(); });
 
-    window.addEventListener('resize', function () { if (S.lastHits.length && S.running) zeichne(S.lastHits); });
+    verdrahteZoom();
+
+    $('compareBtn').addEventListener('click', function () { $('compareInput').click(); });
+    $('compareInput').addEventListener('change', function () {
+      if (this.files && this.files[0]) vergleicheMit(this.files[0]);
+      this.value = '';
+    });
+    $('reportBtn').addEventListener('click', sichereBericht);
+
+    $('classSearch').addEventListener('input', function () { baueKlassenChips(this.value); });
+    $('clearFilterBtn').addEventListener('click', function () {
+      S.filter = null;
+      $('classSearch').value = '';
+      baueKlassenChips('');
+      aktualisiereFilterHinweis();
+    });
+
+    window.addEventListener('resize', function () {
+      if (S.lastHits.length && S.running) zeichne(S.lastHits);
+      wendeZoomAn();
+    });
   }
 
   async function start() {
@@ -544,6 +920,8 @@
     }
     try {
       await ladeModellDaten();
+      baueKlassenChips('');
+      aktualisiereFilterHinweis();
       await initDetector('live');
     } catch (err) {
       S.detectorReady = false;

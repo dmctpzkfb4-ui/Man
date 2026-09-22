@@ -552,7 +552,7 @@
     var out = {
       exifTiff: null, xmp: '', comments: [], width: 0, height: 0,
       hasJfif: false, hasAdobeApp14: false, hasPhotoshopIrb: false, hasC2pa: false,
-      progressive: false, markers: [], quantTableCount: 0, iccChunks: 0, mpf: false
+      progressive: false, markers: [], quantTableCount: 0, quantTables: [], iccChunks: 0, mpf: false
     };
     if (!bytes || bytes.length < 4 || bytes[0] !== 0xFF || bytes[1] !== 0xD8) return out;
     var p = 2;
@@ -578,6 +578,22 @@
         if (marker === 0xC2) out.progressive = true;
       } else if (marker === 0xDB) {
         out.quantTableCount++;
+        // Die Tabellenwerte selbst sind forensisch das Wertvollste am JPEG:
+        // aus ihnen laesst sich die Qualitaetsstufe und oft der Urheber
+        // (Kamera gegen Bearbeitungsprogramm) ableiten.
+        var qp = segStart;
+        while (qp < segEnd) {
+          var prec = bytes[qp] >> 4;          // 0 = 8 Bit, 1 = 16 Bit
+          var id = bytes[qp] & 0x0F;
+          qp++;
+          var tbl = new Array(64);
+          for (var qi = 0; qi < 64; qi++) {
+            if (prec === 0) { tbl[qi] = bytes[qp]; qp += 1; }
+            else { tbl[qi] = (bytes[qp] << 8) | bytes[qp + 1]; qp += 2; }
+          }
+          if (qp > segEnd + 1) break;         // beschaedigtes Segment
+          out.quantTables.push({ id: id, precision: prec === 0 ? 8 : 16, values: tbl });
+        }
       } else if (marker === 0xE0 && hasSignature(bytes, segStart, 'JFIF')) {
         out.hasJfif = true;
       } else if (marker === 0xE1) {
@@ -1018,6 +1034,23 @@
           addFinding(out.findings, 'info',
             'Progressives JPEG. Im Web üblich, bei Kameras selten - deutet auf Weiterverarbeitung hin.');
         }
+        /* Quantisierungstabellen: verraten Qualitaetsstufe und Urheber */
+        var qt = analyseQuantTables(container.quantTables);
+        if (qt.tables.length) {
+          out.quant = qt;
+          out.tags['JPEG-Qualitaet (geschaetzt)'] = qt.quality + ' von 100';
+          out.tags['Quantisierungstabellen'] = qt.tables.length + ' (' + qt.urheber + ')';
+          for (var qf = 0; qf < qt.findings.length; qf++) {
+            addFinding(out.findings, qt.findings[qf].level, qt.findings[qf].text);
+          }
+          // Eine Kameraaufnahme mit Standardtabellen ist ein Widerspruch.
+          if (qt.standard && hatKamera) {
+            addFinding(out.findings, 'alarm',
+              'Widerspruch: Die Metadaten nennen eine Kamera, die Quantisierungstabellen stammen ' +
+              'aber aus der Standardbibliothek. Kameras schreiben eigene Tabellen - die Datei wurde ' +
+              'nach der Aufnahme neu kodiert, die EXIF-Daten aber uebernommen.');
+          }
+        }
         if (container.comments && container.comments.length) {
           for (var ci = 0; ci < Math.min(container.comments.length, 3); ci++) {
             var cm = String(container.comments[ci]).trim();
@@ -1286,6 +1319,261 @@
   }
 
   /* =========================================================================
+   * 9b. JPEG-Quantisierungstabellen
+   *
+   * Beim Speichern eines JPEGs werden die DCT-Koeffizienten durch eine
+   * 8x8-Tabelle geteilt. Diese Tabelle steht in der Datei und verraet
+   * zweierlei: die Qualitaetsstufe, und - weit interessanter - WER die Datei
+   * geschrieben hat. Die freie Referenzbibliothek (IJG/libjpeg) leitet ihre
+   * Tabellen nach einer festen Formel aus zwei Basistabellen ab. Trifft eine
+   * Datei diese Formel exakt, stammt sie mit hoher Wahrscheinlichkeit aus
+   * gaengiger Software. Kamerahersteller verwenden eigene, abweichende
+   * Tabellen - ein Original aus der Kamera passt also gerade NICHT.
+   * ========================================================================= */
+
+  // Reihenfolge, in der die 64 Werte im DQT-Segment stehen (Zickzack).
+  var ZIGZAG = [
+     0, 1, 8,16, 9, 2, 3,10, 17,24,32,25,18,11, 4, 5,
+    12,19,26,33,40,48,41,34, 27,20,13, 6, 7,14,21,28,
+    35,42,49,56,57,50,43,36, 29,22,15,23,30,37,44,51,
+    58,59,52,45,38,31,39,46, 53,60,61,54,47,55,62,63
+  ];
+
+  var IJG_LUMA = [
+    16,11,10,16,24,40,51,61, 12,12,14,19,26,58,60,55,
+    14,13,16,24,40,57,69,56, 14,17,22,29,51,87,80,62,
+    18,22,37,56,68,109,103,77, 24,35,55,64,81,104,113,92,
+    49,64,78,87,103,121,120,101, 72,92,95,98,112,100,103,99
+  ];
+  var IJG_CHROMA = [
+    17,18,24,47,99,99,99,99, 18,21,26,66,99,99,99,99,
+    24,26,56,99,99,99,99,99, 47,66,99,99,99,99,99,99,
+    99,99,99,99,99,99,99,99, 99,99,99,99,99,99,99,99,
+    99,99,99,99,99,99,99,99, 99,99,99,99,99,99,99,99
+  ];
+
+  /** Zickzack-Reihenfolge -> natuerliche Zeilenreihenfolge. */
+  function deZigzag(values) {
+    var out = new Array(64);
+    for (var i = 0; i < 64; i++) out[ZIGZAG[i]] = values[i];
+    return out;
+  }
+
+  /** Die IJG-Skalierungsformel: aus Basistabelle und Qualitaet 1..100. */
+  function ijgScale(base, quality) {
+    var q = Math.max(1, Math.min(100, quality));
+    var s = q < 50 ? Math.floor(5000 / q) : 200 - 2 * q;
+    var out = new Array(64);
+    for (var i = 0; i < 64; i++) {
+      var v = Math.floor((base[i] * s + 50) / 100);
+      out[i] = v < 1 ? 1 : (v > 255 ? 255 : v);
+    }
+    return out;
+  }
+
+  /**
+   * Sucht die Qualitaetsstufe, deren IJG-Tabelle der gemessenen am naechsten
+   * kommt. Abweichung 0 bedeutet: exakt die Standardtabelle.
+   */
+  function matchIjgQuality(natural, base) {
+    var bestQ = 0, bestDiff = Infinity;
+    for (var q = 1; q <= 100; q++) {
+      var t = ijgScale(base, q), d = 0;
+      for (var i = 0; i < 64; i++) d += Math.abs(t[i] - natural[i]);
+      if (d < bestDiff) { bestDiff = d; bestQ = q; }
+      if (d === 0) break;
+    }
+    return { quality: bestQ, deviation: bestDiff };
+  }
+
+  /**
+   * Wertet alle Tabellen einer Datei aus.
+   * @returns {{tables:Array, quality:number|null, standard:boolean,
+   *            urheber:string, findings:Array}}
+   */
+  function analyseQuantTables(quantTables) {
+    var erg = { tables: [], quality: null, standard: false, urheber: 'unbestimmt', findings: [] };
+    if (!quantTables || !quantTables.length) return erg;
+
+    for (var i = 0; i < quantTables.length; i++) {
+      var t = quantTables[i];
+      if (!t.values || t.values.length !== 64) continue;
+      var nat = deZigzag(t.values);
+      var basis = t.id === 0 ? IJG_LUMA : IJG_CHROMA;
+      var m = matchIjgQuality(nat, basis);
+      // Summe der Tabellenwerte: grobes, aber robustes Mass fuer die Staerke
+      // der Kompression. Kleine Summe = wenig Verlust.
+      var summe = 0;
+      for (var k = 0; k < 64; k++) summe += nat[k];
+      erg.tables.push({
+        id: t.id, precision: t.precision,
+        art: t.id === 0 ? 'Helligkeit' : 'Farbe',
+        quality: m.quality, deviation: m.deviation,
+        sum: summe, natural: nat
+      });
+    }
+    if (!erg.tables.length) return erg;
+
+    var luma = null;
+    for (var j = 0; j < erg.tables.length; j++) if (erg.tables[j].id === 0) { luma = erg.tables[j]; break; }
+    if (!luma) luma = erg.tables[0];
+    erg.quality = luma.quality;
+    erg.standard = erg.tables.every(function (x) { return x.deviation === 0; });
+
+    if (erg.standard) {
+      erg.urheber = 'Standardbibliothek';
+      addFinding(erg.findings, 'warn',
+        'Die Quantisierungstabellen entsprechen exakt dem Standard der freien JPEG-Bibliothek ' +
+        '(Qualitaetsstufe ' + erg.quality + '). Kameras verwenden eigene Tabellen - die Datei wurde ' +
+        'also mit hoher Wahrscheinlichkeit von einem Programm neu geschrieben, nicht direkt aufgenommen.');
+    } else if (luma.deviation < 64) {
+      erg.urheber = 'standardnah';
+      addFinding(erg.findings, 'info',
+        'Die Tabellen liegen nahe am Standard (geschaetzte Qualitaet etwa ' + erg.quality +
+        '), weichen aber leicht ab. Das ist typisch fuer angepasste Kodierer.');
+    } else {
+      erg.urheber = 'geraetespezifisch';
+      addFinding(erg.findings, 'info',
+        'Die Quantisierungstabellen weichen deutlich vom Standard ab (geschaetzte Qualitaet etwa ' +
+        erg.quality + '). Das spricht fuer einen geraetespezifischen Kodierer, wie ihn Kameras ' +
+        'und Mobiltelefone verwenden.');
+    }
+
+    if (erg.quality !== null && erg.quality >= 96) {
+      addFinding(erg.findings, 'info',
+        'Sehr hohe Qualitaetsstufe (' + erg.quality + '). Bei Aufnahmen unueblich, bei bewusst ' +
+        'verlustarm exportierten Dateien dagegen normal.');
+    }
+    if (erg.tables.length > 2) {
+      addFinding(erg.findings, 'warn',
+        erg.tables.length + ' Quantisierungstabellen statt der ueblichen zwei. Das kommt bei ' +
+        'mehrfach verschachtelten oder zusammengesetzten Dateien vor.');
+    }
+    return erg;
+  }
+
+  /* =========================================================================
+   * 9c. Perzeptuelle Prüfsummen
+   *
+   * SHA-256 aendert sich beim kleinsten Bit. Perzeptuelle Hashes bleiben
+   * dagegen stabil, wenn ein Bild skaliert, leicht nachbearbeitet oder neu
+   * komprimiert wird - damit laesst sich erkennen, dass zwei Dateien
+   * DASSELBE BILD zeigen, obwohl ihre Prüfsummen verschieden sind.
+   * ========================================================================= */
+
+  function grauRaster(source, n) {
+    var img = drawToImageData(source, n, n);
+    if (!img) return null;
+    var d = img.data, g = new Float64Array(n * n);
+    for (var i = 0, p = 0; i < d.length; i += 4, p++) {
+      g[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    }
+    return g;
+  }
+
+  function bitsToHex(bits) {
+    var hex = '';
+    for (var i = 0; i < bits.length; i += 4) {
+      hex += ((bits[i] << 3) | (bits[i + 1] << 2) | (bits[i + 2] << 1) | bits[i + 3]).toString(16);
+    }
+    return hex;
+  }
+
+  /** Mittelwert-Hash: Pixel heller als der Durchschnitt -> 1. */
+  function averageHashFrom(g, n) {
+    var mittel = 0;
+    for (var i = 0; i < g.length; i++) mittel += g[i];
+    mittel /= g.length;
+    var bits = new Array(g.length);
+    for (var j = 0; j < g.length; j++) bits[j] = g[j] > mittel ? 1 : 0;
+    return bitsToHex(bits);
+  }
+
+  /** Differenz-Hash: jedes Pixel gegen seinen rechten Nachbarn. */
+  function differenceHashFrom(g, w, h) {
+    var bits = [];
+    for (var y = 0; y < h; y++) {
+      for (var x = 0; x < w - 1; x++) bits.push(g[y * w + x] < g[y * w + x + 1] ? 1 : 0);
+    }
+    return bitsToHex(bits);
+  }
+
+  /** Diskrete Kosinustransformation, Typ II, quadratisch. */
+  function dct2d(g, n) {
+    var out = new Float64Array(n * n);
+    var cos = new Float64Array(n * n);
+    for (var u = 0; u < n; u++) {
+      for (var x = 0; x < n; x++) cos[u * n + x] = Math.cos((2 * x + 1) * u * Math.PI / (2 * n));
+    }
+    for (var v = 0; v < n; v++) {
+      for (var u2 = 0; u2 < n; u2++) {
+        var summe = 0;
+        for (var y = 0; y < n; y++) {
+          for (var x2 = 0; x2 < n; x2++) summe += g[y * n + x2] * cos[u2 * n + x2] * cos[v * n + y];
+        }
+        var cu = u2 === 0 ? Math.SQRT1_2 : 1, cv = v === 0 ? Math.SQRT1_2 : 1;
+        out[v * n + u2] = 0.25 * cu * cv * summe;
+      }
+    }
+    return out;
+  }
+
+  /** Wahrnehmungs-Hash: niedrige Frequenzen der DCT gegen deren Median. */
+  function perceptualHashFrom(g, n, k) {
+    var d = dct2d(g, n);
+    var werte = [];
+    for (var y = 0; y < k; y++) for (var x = 0; x < k; x++) werte.push(d[y * n + x]);
+    var ohneDc = werte.slice(1).sort(function (a, b) { return a - b; });
+    var median = ohneDc.length % 2
+      ? ohneDc[(ohneDc.length - 1) / 2]
+      : (ohneDc[ohneDc.length / 2 - 1] + ohneDc[ohneDc.length / 2]) / 2;
+    var bits = werte.map(function (v) { return v > median ? 1 : 0; });
+    return bitsToHex(bits);
+  }
+
+  /** Hamming-Abstand zweier Hex-Hashes gleicher Laenge. */
+  function hammingDistance(a, b) {
+    if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return -1;
+    var d = 0;
+    for (var i = 0; i < a.length; i++) {
+      var x = parseInt(a[i], 16) ^ parseInt(b[i], 16);
+      while (x) { d += x & 1; x >>= 1; }
+    }
+    return d;
+  }
+
+  /**
+   * Berechnet alle drei perzeptuellen Hashes eines Bildes.
+   * @returns {{aHash:string, dHash:string, pHash:string, error:string|null}}
+   */
+  async function perceptualHashes(source) {
+    var leer = { aHash: '', dHash: '', pHash: '', error: null };
+    try {
+      var g8 = grauRaster(source, 8);
+      if (!g8) { leer.error = 'Bild konnte nicht gerastert werden.'; return leer; }
+      var g9 = drawToImageData(source, 9, 8);
+      var gd = null;
+      if (g9) {
+        gd = new Float64Array(9 * 8);
+        for (var i = 0, p = 0; i < g9.data.length; i += 4, p++) {
+          gd[p] = 0.299 * g9.data[i] + 0.587 * g9.data[i + 1] + 0.114 * g9.data[i + 2];
+        }
+      }
+      await yieldToUi();
+      var g32 = grauRaster(source, 32);
+      return {
+        aHash: averageHashFrom(g8, 8),
+        dHash: gd ? differenceHashFrom(gd, 9, 8) : '',
+        pHash: g32 ? perceptualHashFrom(g32, 32, 8) : '',
+        error: null
+      };
+    } catch (e) {
+      leer.error = 'Perzeptuelle Prüfsummen konnten nicht berechnet werden.';
+      return leer;
+    }
+  }
+
+  /* =========================================================================
    * 10. Gesamtbericht
    * ========================================================================= */
 
@@ -1326,6 +1614,10 @@
         reportProgress(opts.onProgress, 'rauschen', 0.75);
         erg.rauschen = await noiseResidual(bmp);
         if (erg.rauschen && erg.rauschen.error) erg.fehler.push(erg.rauschen.error);
+
+        reportProgress(opts.onProgress, 'phash', 0.85);
+        erg.perzeptuell = await perceptualHashes(bmp);
+        if (erg.perzeptuell && erg.perzeptuell.error) erg.fehler.push(erg.perzeptuell.error);
 
         reportProgress(opts.onProgress, 'copymove', 0.9);
         erg.copyMove = await copyMoveHint(bmp, opts.copyMove);
@@ -1372,8 +1664,15 @@
     noiseResidual: noiseResidual,
     copyMoveHint: copyMoveHint,
     report: report,
+    analyseQuantTables: analyseQuantTables,
+    perceptualHashes: perceptualHashes,
+    hammingDistance: hammingDistance,
     // für Tests in Node
     _intern: {
+      deZigzag: deZigzag, ijgScale: ijgScale, matchIjgQuality: matchIjgQuality,
+      dct2d: dct2d, bitsToHex: bitsToHex, averageHashFrom: averageHashFrom,
+      differenceHashFrom: differenceHashFrom, perceptualHashFrom: perceptualHashFrom,
+      IJG_LUMA: IJG_LUMA, IJG_CHROMA: IJG_CHROMA, ZIGZAG: ZIGZAG,
       detectFormat: detectFormat, parseTiffBlock: parseTiffBlock,
       dmsToDecimal: dmsToDecimal, exifDate: exifDate, formatTag: formatTag,
       scanJpeg: scanJpeg, scanWebp: scanWebp, sha256Js: sha256Js, sha1Js: sha1Js

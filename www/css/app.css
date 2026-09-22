@@ -1253,3 +1253,70 @@ canvas.hist {
   max-height: 62vh;
   object-fit: contain;
 }
+
+/* ==========================================================================
+   Erweiterungen: Zoom, Klassenfilter, Vergleich
+   ========================================================================== */
+
+.zoombar {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--r-md);
+  background: rgba(7, 12, 15, 0.82);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(8px);
+}
+.zoombar .iconbtn { width: 30px; height: 28px; font-size: 15px; line-height: 1; }
+.zoom-level {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-2);
+  min-width: 46px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Beim Zoomen darf der Browser nicht selbst scrollen oder wischen. */
+.stage--analyse { touch-action: none; overflow: hidden; }
+.stage--analyse canvas { transform-origin: 0 0; will-change: transform; }
+.stage--analyse.is-zoomed canvas { cursor: grab; }
+.stage--analyse.is-panning canvas { cursor: grabbing; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 5px; max-height: 132px; overflow-y: auto; }
+.chips .chip {
+  cursor: pointer;
+  user-select: none;
+  border: 1px solid var(--line);
+  background: var(--panel-2);
+  color: var(--text-2);
+}
+.chips .chip.is-on {
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+  color: var(--accent-hi);
+}
+
+.cmp-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 0;
+  font-size: 13px;
+}
+.cmp-verdict {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--line);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.cmp-verdict[data-level="ok"]   { border-color: var(--ok);   background: var(--ok-soft); }
+.cmp-verdict[data-level="warn"] { border-color: var(--warn); background: var(--warn-soft); }
+.cmp-verdict[data-level="crit"] { border-color: var(--crit); background: var(--crit-soft); }
