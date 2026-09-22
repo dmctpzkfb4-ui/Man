@@ -656,8 +656,16 @@
         if (state) state.ready = false;
       };
 
-      var ortBase = opts.wasmPaths || DEFAULT_ORT_BASE;
-      var ortUrl = opts.ortUrl || (ortBase + 'ort.min.js');
+      // ABSOLUT machen, sonst loest importScripts() im Worker relativ zur
+      // WORKER-Datei auf (js/detector.worker.js) statt zur Seite - aus
+      // "vendor/ort.min.js" wuerde "/js/vendor/ort.min.js", und das gibt es nicht.
+      // Dasselbe gilt fuer wasmPaths: sonst sucht ORT die .wasm am falschen Ort.
+      function absolut(pfad) {
+        try { return new URL(pfad, window.location.href).href; }
+        catch (err) { return pfad; }
+      }
+      var ortBase = absolut(opts.wasmPaths || DEFAULT_ORT_BASE);
+      var ortUrl = absolut(opts.ortUrl || (opts.wasmPaths || DEFAULT_ORT_BASE) + 'ort.min.js');
 
       return state.bridge.send('init', {
         modelUrl: new URL(opts.modelUrl, window.location.href).href,

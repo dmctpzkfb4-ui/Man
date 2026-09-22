@@ -89,14 +89,34 @@ public class ScreenCapturePlugin extends Plugin {
         // reine Verschwendung und würde die Bildrate halbieren.
         int ziel = call.getInt("maxWidth", 720);
 
-        DisplayMetrics m = new DisplayMetrics();
-        getActivity().getWindowManager().getDefaultDisplay().getRealMetrics(m);
-        dichte = m.densityDpi;
-        float f = Math.min(1f, (float) ziel / Math.max(1, m.widthPixels));
-        breite = Math.max(2, Math.round(m.widthPixels * f) & ~1);
-        hoehe = Math.max(2, Math.round(m.heightPixels * f) & ~1);
+        try {
+            int pw, ph;
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                // getDefaultDisplay() ist veraltet und liefert auf manchen Geraeten
+                // null - ein NPE hier riss die ganze App mit.
+                android.view.WindowMetrics wm =
+                        getActivity().getWindowManager().getCurrentWindowMetrics();
+                android.graphics.Rect b = wm.getBounds();
+                pw = b.width(); ph = b.height();
+                dichte = getContext().getResources().getDisplayMetrics().densityDpi;
+            } else {
+                DisplayMetrics m = new DisplayMetrics();
+                getActivity().getWindowManager().getDefaultDisplay().getRealMetrics(m);
+                pw = m.widthPixels; ph = m.heightPixels; dichte = m.densityDpi;
+            }
+            if (pw <= 0 || ph <= 0) { call.reject("Bildschirmmaße konnten nicht ermittelt werden."); return; }
+            if (dichte <= 0) dichte = 320;
 
-        startActivityForResult(call, manager.createScreenCaptureIntent(), "zustimmungErhalten");
+            float f = Math.min(1f, (float) ziel / Math.max(1, pw));
+            breite = Math.max(2, Math.round(pw * f) & ~1);
+            hoehe = Math.max(2, Math.round(ph * f) & ~1);
+
+            startActivityForResult(call, manager.createScreenCaptureIntent(), "zustimmungErhalten");
+        } catch (Throwable t) {
+            // Nichts darf von hier nach oben durchschlagen: eine nicht gefangene
+            // Ausnahme in einem Plugin beendet die App.
+            call.reject("Bildschirmaufnahme konnte nicht vorbereitet werden: " + t.getMessage());
+        }
     }
 
     @ActivityCallback
@@ -110,10 +130,20 @@ public class ScreenCapturePlugin extends Plugin {
             // Reihenfolge ist zwingend: ab Android 14 muss der Vordergrunddienst
             // laufen, BEVOR getMediaProjection aufgerufen wird.
             ScreenCaptureService.starten(getContext());
-            Thread.sleep(220);
+        } catch (Throwable t) {
+            call.reject("Der Vordergrunddienst ließ sich nicht starten: " + t.getMessage());
+            return;
+        }
+        // Dem Dienst Zeit geben, startForeground() zu erreichen - aber OHNE den
+        // Hauptthread schlafen zu legen. Ein Thread.sleep hier blockierte die
+        // Oberflaeche und konnte eine Reaktionszeit-Warnung ausloesen.
+        handler.postDelayed(() -> weiterNachDienst(call, result), 350);
+    }
 
+    private void weiterNachDienst(PluginCall call, ActivityResult result) {
+        try {
             projection = manager.getMediaProjection(result.getResultCode(), result.getData());
-            if (projection == null) { call.reject("Aufnahme konnte nicht gestartet werden."); return; }
+            if (projection == null) { freigeben(); call.reject("Aufnahme konnte nicht gestartet werden."); return; }
 
             // Ebenfalls zwingend ab Android 14: Rueckruf vor dem VirtualDisplay.
             projection.registerCallback(callback, handler);
@@ -123,14 +153,16 @@ public class ScreenCapturePlugin extends Plugin {
                     "ForensikVisionCapture", breite, hoehe, dichte,
                     DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                     reader.getSurface(), null, handler);
+            if (display == null) { freigeben(); call.reject("Virtuelle Anzeige konnte nicht angelegt werden."); return; }
 
             JSObject r = new JSObject();
             r.put("width", breite);
             r.put("height", hoehe);
             call.resolve(r);
-        } catch (Exception e) {
+        } catch (Throwable t) {
             freigeben();
-            call.reject("Aufnahme fehlgeschlagen: " + e.getMessage());
+            String m = String.valueOf(t.getMessage());
+            call.reject("Aufnahme fehlgeschlagen: " + t.getClass().getSimpleName() + " - " + m);
         }
     }
 
@@ -170,8 +202,8 @@ public class ScreenCapturePlugin extends Plugin {
             r.put("width", breite);
             r.put("height", hoehe);
             call.resolve(r);
-        } catch (Exception e) {
-            call.reject("Bild konnte nicht gelesen werden: " + e.getMessage());
+        } catch (Throwable t) {
+            call.reject("Bild konnte nicht gelesen werden: " + t.getMessage());
         } finally {
             if (bild != null) bild.close();
         }

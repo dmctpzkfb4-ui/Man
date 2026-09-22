@@ -47,11 +47,64 @@
     return d;
   }
 
+  /* ==================================================== Laufband (Live-Ausgabe)
+   * Zeigt fortlaufend, was gerade passiert. Absichtlich nur EINE Zeile: ein
+   * zweites Protokoll waere Verdopplung. Ereignisse werden gedrosselt, sonst
+   * flackert die Zeile bei 15 Bildern je Sekunde unleserlich.
+   * ====================================================================== */
+
+  var tickerLetzte = 0, tickerText = '';
+
+  function ticker(text, level, sofort) {
+    var jetzt = performance.now();
+    if (!sofort && text === tickerText) return;
+    if (!sofort && jetzt - tickerLetzte < 400) return;
+    tickerLetzte = jetzt;
+    tickerText = text;
+    var el = $('tickerText');
+    el.textContent = text;
+    el.classList.remove('wechsel');
+    void el.offsetWidth;            // Neustart der Einblendung erzwingen
+    el.classList.add('wechsel');
+    $('tickerZeit').textContent = new Date().toLocaleTimeString('de-DE');
+    var box = $('ticker');
+    if (level) box.setAttribute('data-level', level); else box.removeAttribute('data-level');
+  }
+
+  function tickerLebt(an) { $('ticker').classList.toggle('is-live', !!an); }
+
+  /** Kleine Verlaufskurve der Inferenzzeit - zeigt Einbrüche sofort. */
+  var msVerlauf = [];
+  function zeichneSpark(ms) {
+    msVerlauf.push(ms);
+    if (msVerlauf.length > 40) msVerlauf.shift();
+    var c = $('msSpark');
+    if (!c) return;
+    var g = c.getContext('2d');
+    var w = c.width, h = c.height;
+    g.clearRect(0, 0, w, h);
+    if (msVerlauf.length < 2) return;
+    var max = Math.max.apply(null, msVerlauf) * 1.15 || 1;
+    g.beginPath();
+    msVerlauf.forEach(function (v, i) {
+      var x = (i / (msVerlauf.length - 1)) * w;
+      var y = h - (v / max) * (h - 3) - 1.5;
+      if (i) g.lineTo(x, y); else g.moveTo(x, y);
+    });
+    var letzte = msVerlauf[msVerlauf.length - 1];
+    g.strokeStyle = letzte < 120 ? '#5CA97A' : letzte < 300 ? '#CC9C3D' : '#D05F52';
+    g.lineWidth = 2;
+    g.lineJoin = 'round';
+    g.stroke();
+  }
+
   function log(cat, text, detail) {
     var e = { t: Date.now(), cat: cat, text: text, detail: detail || null };
     S.log.unshift(e);
     if (S.log.length > 400) S.log.length = 400;
     renderLog();
+    var stufe = cat === 'fehler' ? 'crit' : (cat === 'befund' ? 'warn' : null);
+    ticker(text, stufe, true);
   }
 
   function zeit(ts) {
@@ -263,6 +316,45 @@
     });
   }
 
+  /* Meldet die aktuelle Lage im Laufband und schreibt NEU aufgetauchte
+   * Klassen ins Protokoll. Jedes Einzelbild zu protokollieren waere bei
+   * 15 Bildern je Sekunde unbrauchbar - interessant ist die Veraenderung. */
+  var zuletztGesehen = new Set();
+  var gesehenSeit = {};
+
+  function meldeLage(hits) {
+    if (!hits.length) {
+      ticker(S.quelle === 'bildschirm' ? 'Bildschirm — nichts erkannt' : 'Kamera — nichts erkannt');
+      zuletztGesehen.forEach(function (n) { delete gesehenSeit[n]; });
+      zuletztGesehen = new Set();
+      return;
+    }
+    var zaehl = {};
+    hits.forEach(function (d) { zaehl[d.label] = (zaehl[d.label] || 0) + 1; });
+    var namen = Object.keys(zaehl).sort(function (a, b) { return zaehl[b] - zaehl[a]; });
+
+    ticker(namen.slice(0, 4).map(function (n) {
+      return zaehl[n] > 1 ? n + ' ×' + zaehl[n] : n;
+    }).join(' · ') + (namen.length > 4 ? ' · +' + (namen.length - 4) : ''), 'ok');
+
+    var jetzt = new Set(namen);
+    var neue = namen.filter(function (n) { return !zuletztGesehen.has(n); });
+    // Erst protokollieren, wenn eine Klasse ein paar Bilder lang stabil da ist -
+    // sonst fuellt jeder Fehltreffer das Protokoll.
+    neue.forEach(function (n) {
+      gesehenSeit[n] = (gesehenSeit[n] || 0) + 1;
+      if (gesehenSeit[n] === 3) {
+        var best = hits.filter(function (d) { return d.label === n; })
+          .reduce(function (a, b) { return b.score > a.score ? b : a; });
+        log('erkennung', n + ' erkannt',
+          Math.round(best.score * 100) + ' % · ' + zaehl[n] + '× im Bild · ' +
+          (S.quelle === 'bildschirm' ? 'Bildschirm' : 'Kamera'));
+      }
+    });
+    Object.keys(gesehenSeit).forEach(function (n) { if (!jetzt.has(n)) delete gesehenSeit[n]; });
+    zuletztGesehen = jetzt;
+  }
+
   async function schleife() {
     if (!S.running) return;
     if (S.detectorReady && !S.busy) {
@@ -279,6 +371,8 @@
         renderHits(hits);
         var st = window.Detector.stats;
         $('mMs').textContent = st.lastInferenceMs + ' ms';
+        zeichneSpark(st.lastInferenceMs);
+        meldeLage(hits);
         S.fpsWindow.push(performance.now() - t0);
         if (S.fpsWindow.length > 12) S.fpsWindow.shift();
         var mittel = S.fpsWindow.reduce(function (a, b) { return a + b; }, 0) / S.fpsWindow.length;
@@ -372,6 +466,8 @@
     $('stopSrcBtn').disabled = false;
     $('flipBtn').disabled = true;
     S.running = true;
+    tickerLebt(true);
+    ticker('Bildschirmaufnahme läuft', null, true);
     schleife();
   }
 
@@ -423,6 +519,11 @@
 
   function stoppeQuelle() {
     S.running = false;
+    tickerLebt(false);
+    ticker('Quelle beendet', null, true);
+    msVerlauf = [];
+    zuletztGesehen = new Set();
+    gesehenSeit = {};
     S.schirmAktiv = false;
     if (S.stream) { S.stream.getTracks().forEach(function (t) { t.stop(); }); S.stream = null; }
     var p = schirmPlugin();

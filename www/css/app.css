@@ -1334,3 +1334,75 @@ canvas.hist {
 .stage--live.quelle-bildschirm #screenView { display: block; }
 .stage--live.quelle-bildschirm video { display: none; }
 #sourceSeg { margin-bottom: 4px; }
+
+/* ==========================================================================
+   Korrekturen und Live-Ausgabe
+   ========================================================================== */
+
+/* Sechs Ebenen passen nicht in eine 360-px-Zeile: grid-auto-columns:1fr
+   quetschte sie auf 60 px und die Beschriftungen liefen ineinander.
+   Stattdessen waagerecht scrollen und jedem Knopf seine Breite lassen. */
+.seg {
+  display: flex;
+  grid-auto-flow: unset;
+  grid-auto-columns: unset;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  scroll-snap-type: x proximity;
+}
+.seg::-webkit-scrollbar { display: none; }
+.seg button {
+  flex: 0 0 auto;
+  min-width: max-content;
+  padding-inline: 14px;
+  scroll-snap-align: start;
+  white-space: nowrap;
+}
+
+/* Laufband: zeigt fortlaufend, was die App gerade tut. */
+.ticker {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  min-height: 32px;
+  overflow: hidden;
+}
+.ticker-dot {
+  width: 7px; height: 7px; border-radius: 50%;
+  background: var(--text-3);
+  flex: none;
+  transition: background .2s;
+}
+.ticker.is-live .ticker-dot { background: var(--accent); animation: puls 1.8s ease-out infinite; }
+.ticker[data-level="ok"]   .ticker-dot { background: var(--ok); }
+.ticker[data-level="warn"] .ticker-dot { background: var(--warn); }
+.ticker[data-level="crit"] .ticker-dot { background: var(--crit); }
+@keyframes puls {
+  0%   { box-shadow: 0 0 0 0 rgba(70,168,201,.55); }
+  100% { box-shadow: 0 0 0 8px rgba(70,168,201,0); }
+}
+@media (prefers-reduced-motion: reduce) { .ticker.is-live .ticker-dot { animation: none; } }
+.ticker-text {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ticker-text.wechsel { animation: einblenden .25s ease; }
+@keyframes einblenden { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+.ticker-zeit { color: var(--text-3); font-size: 10.5px; flex: none; font-variant-numeric: tabular-nums; }
+
+/* Verlaufskurve der Inferenzzeit im Kopf der Live-Ansicht */
+.hud canvas {
+  width: 62px; height: 18px;
+  display: block;
+  opacity: .85;
+}

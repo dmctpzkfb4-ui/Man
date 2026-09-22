@@ -34,6 +34,12 @@
     </div>
   </header>
 
+  <div class="ticker" id="ticker" aria-live="polite">
+    <span class="ticker-dot" aria-hidden="true"></span>
+    <span class="ticker-text" id="tickerText">bereit</span>
+    <span class="ticker-zeit" id="tickerZeit"></span>
+  </div>
+
   <div class="boot-notices" id="bootNotices"></div>
 
   <main class="main">
@@ -60,6 +66,7 @@
             <span class="metric"><span class="metric-label">Inferenz</span><span class="metric-value" id="mMs">–</span></span>
             <span class="metric"><span class="metric-label">Backend</span><span class="metric-value" id="mBackend">–</span></span>
             <span class="metric"><span class="metric-label">Treffer</span><span class="metric-value" id="mHits">0</span></span>
+            <span class="metric"><span class="metric-label">Verlauf</span><canvas id="msSpark" width="124" height="36"></canvas></span>
           </div>
         </div>
 

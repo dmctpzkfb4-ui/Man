@@ -50,10 +50,18 @@ public class ScreenCaptureService extends Service {
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .build();
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
-        } else {
-            startForeground(NOTIFICATION_ID, n);
+        // startForeground kann werfen - etwa wenn die App gerade nicht im
+        // Vordergrund ist oder die Benachrichtigungs-Berechtigung fehlt. Eine
+        // ungefangene Ausnahme im Dienst beendet den gesamten Prozess.
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+            } else {
+                startForeground(NOTIFICATION_ID, n);
+            }
+        } catch (Throwable t) {
+            stopSelf();
+            return START_NOT_STICKY;
         }
         return START_NOT_STICKY;
     }
