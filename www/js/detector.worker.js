@@ -81,7 +81,15 @@ async function createSession(modelUrl, prefer) {
       progress('session', 0.4, 'Starte Modell auf ' + ep.toUpperCase() + ' …');
       var s = await ort.InferenceSession.create(modelUrl, {
         executionProviders: [ep],
-        graphOptimizationLevel: 'all'
+        graphOptimizationLevel: 'all',
+        // Der Speicher-Arena von ONNX Runtime behaelt freigegebene Bloecke,
+        // um spaetere Laeufe zu beschleunigen. Bei Dauerbetrieb waechst er
+        // dadurch auf ein Vielfaches und gibt nie etwas zurueck - auf einem
+        // Telefon beendet das System die App irgendwann. Ohne Arena wird je
+        // Lauf frisch belegt und wieder freigegeben: etwas langsamer, aber
+        // der Bedarf bleibt flach.
+        enableCpuMemArena: false,
+        executionMode: 'sequential'
       });
       backend = ep;
       return s;

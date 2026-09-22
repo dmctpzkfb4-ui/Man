@@ -7,8 +7,8 @@
 (function () {
   'use strict';
 
-  var FASSUNG = "2.1";
-  var STAND = "2026-09-22 04:16";
+  var FASSUNG = "2.2";
+  var STAND = "2026-09-22 04:42";
 
   var $ = function (id) { return document.getElementById(id); };
   var LIVE_MODEL = { url: 'models/model-320.onnx', size: 320 };
@@ -18,7 +18,7 @@
     labels: [], meta: null,
     detectorReady: false, detectorMode: null,
     stream: null, facing: 'environment', running: false, busy: false,
-    quelle: 'kamera', srcW: 0, srcH: 0,
+    quelle: 'kamera', srcW: 0, srcH: 0, warPausiert: false, freigabeUhr: null,
     schirmAktiv: false, schirmNativ: false, schirmBitmap: null,
     conf: 0.25, iou: 0.45,
     fpsWindow: [], lastHits: [],
@@ -207,8 +207,12 @@
     }
     stopKamera();
     try {
+      // Die Erkennung skaliert ohnehin auf 320 px herunter. Ein 1280x720-Bild
+      // je Frame zu puffern kostet auf dem Telefon ein Vielfaches an Speicher,
+      // ohne einen einzigen Treffer mehr zu bringen.
       S.stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: S.facing, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: S.facing, width: { ideal: 960 }, height: { ideal: 540 },
+                 frameRate: { ideal: 24, max: 30 } },
         audio: false
       });
     } catch (err) {
@@ -223,6 +227,10 @@
     v.srcObject = S.stream;
     await v.play().catch(function () {});
     S.srcW = v.videoWidth; S.srcH = v.videoHeight;
+    if (S.detectorMode === 'still') {
+      try { await initDetector('live'); }
+      catch (e) { log('fehler', 'Umschalten auf das schnelle Modell fehlgeschlagen', e.message); }
+    }
     $('liveVeil').hidden = true;
     $('liveHud').hidden = false;
     $('pauseBtn').disabled = false;
@@ -238,6 +246,10 @@
   function stopKamera() {
     S.running = false;
     if (S.stream) { S.stream.getTracks().forEach(function (t) { t.stop(); }); S.stream = null; }
+    // Spuren stoppen allein reicht nicht: solange srcObject gesetzt bleibt,
+    // haelt das Videoelement seine Dekoder-Puffer fest.
+    var v = $('cam');
+    try { v.pause(); v.srcObject = null; v.removeAttribute('src'); v.load(); } catch (e) {}
   }
 
   /**
@@ -290,9 +302,18 @@
     return hits.filter(function (d) { return S.filter.has(d.classId); });
   }
 
+  var letzteListe = '';
+
   function renderHits(hits) {
     var box = $('hitsList');
     $('mHits').textContent = hits.length;
+    // Der DOM-Neuaufbau ist der teuerste Teil je Bild. Er lohnt nur, wenn
+    // sich an der Liste wirklich etwas geaendert hat.
+    var kennung = hits.map(function (d) {
+      return d.classId + ':' + Math.round(d.score * 20);
+    }).sort().join(',');
+    if (kennung === letzteListe) return;
+    letzteListe = kennung;
     $('hitsNote').textContent = hits.length ? hits.length + ' im Bild' : '–';
     if (!hits.length) { box.innerHTML = '<p class="empty">Noch nichts erkannt.</p>'; return; }
     var zusammen = {};
@@ -360,8 +381,17 @@
     zuletztGesehen = jetzt;
   }
 
+  // Mindestabstand zwischen zwei Erkennungen. Ohne Bremse laeuft die Schleife
+  // so schnell wie das Geraet hergibt - das hebt den Dauerbedarf an Speicher
+  // und Waerme, ohne dass ein Mensch den Unterschied sieht.
+  var TAKT_MS = 90;
+  var letzterLauf = 0;
+
   async function schleife() {
     if (!S.running) return;
+    var jetzt = performance.now();
+    if (jetzt - letzterLauf < TAKT_MS) { requestAnimationFrame(schleife); return; }
+    letzterLauf = jetzt;
     if (S.detectorReady && !S.busy) {
       S.busy = true;
       var t0 = performance.now();
@@ -535,6 +565,12 @@
     if (p && S.schirmNativ) { try { p.stop(); } catch (e) {} }
     if (S.schirmBitmap && S.schirmBitmap.close) { S.schirmBitmap.close(); S.schirmBitmap = null; }
     S.schirmNativ = false;
+    var vv = $('cam');
+    try { vv.pause(); vv.srcObject = null; vv.removeAttribute('src'); vv.load(); } catch (e) {}
+    // Overlay-Leinwand auf null schrumpfen: gibt ihren Bildspeicher sofort frei.
+    var ov = $('overlay'), sv = $('screenView');
+    try { ov.width = 0; ov.height = 0; sv.width = 0; sv.height = 0; } catch (e) {}
+    letzteListe = '';
     $('liveStage').classList.remove('quelle-bildschirm');
     $('liveVeil').hidden = false;
     $('liveHud').hidden = true;
@@ -1781,6 +1817,40 @@
       $('classSearch').value = '';
       baueKlassenChips('');
       aktualisiereFilterHinweis();
+    });
+
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden && S.running) {
+        S.running = false;
+        S.warPausiert = true;
+        tickerLebt(false);
+        clearTimeout(S.freigabeUhr);
+        // Bleibt die App laenger im Hintergrund, Modell und Worker freigeben.
+        // Das ist der groesste einzelne Posten, und genau in dieser Lage
+        // beendet Android Anwendungen wegen Speichermangel.
+        S.freigabeUhr = setTimeout(function () {
+          if (!document.hidden || !S.detectorReady) return;
+          try { window.Detector.dispose(); } catch (e) {}
+          S.detectorReady = false;
+          S.detectorMode = null;
+          log('speicher', 'Modell im Hintergrund freigegeben',
+            'Wird beim nächsten Start neu geladen - das spart dem System rund 200 MB');
+        }, 20000);
+        log('quelle', 'Im Hintergrund angehalten', 'Kamera und Erkennung ruhen');
+      } else if (!document.hidden) {
+        clearTimeout(S.freigabeUhr);
+        if (!S.detectorReady) {
+          initDetector('live').catch(function (e) {
+            log('fehler', 'Modell konnte nicht neu geladen werden', e.message);
+          });
+        }
+        if (S.warPausiert && S.stream) {
+          S.warPausiert = false;
+          S.running = true;
+          tickerLebt(true);
+          schleife();
+        }
+      }
     });
 
     window.addEventListener('resize', function () {
