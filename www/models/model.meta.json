@@ -81,6 +81,10 @@
     "78": "hair drier",
     "79": "toothbrush"
   },
+  "exportiertMit": {
+    "ultralytics": "8.4.158",
+    "opset": 17
+  },
   "varianten": [
     {
       "datei": "model-320.onnx",
@@ -91,7 +95,7 @@
         2100
       ],
       "bytes": 9804172,
-      "zweck": "Live-Kamera - schnell"
+      "zweck": "Live-Kamera und Bildschirm - schnell"
     },
     {
       "datei": "model.onnx",
@@ -107,5 +111,5 @@
   ],
   "eingabeName": "images",
   "nmsEingebaut": false,
-  "hinweis": "Ausgabe ist [1,84,N] transponiert: 4 Box (xywh, zentriert, Modellraum) + 80 Klassenscores. NMS muss clientseitig erfolgen."
+  "hinweis": "Ausgabe [1,84,N] transponiert: 4 Box (xywh, zentriert, Modellraum) + 80 Klassenscores, keine Objectness-Spalte. NMS clientseitig."
 }

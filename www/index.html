@@ -149,9 +149,29 @@
         </div>
         <p class="seg-note" id="segNote"></p>
 
+        <div class="panel panel--flush" id="ansichtPanel" hidden>
+          <div class="panel-body panel-body--tight">
+            <label class="slider-label" id="wischBox" hidden>
+              <span class="slider-head">Wischvergleich <span class="slider-value" id="wischVal">100 %</span></span>
+              <input type="range" id="wischRange" min="0" max="100" value="100" step="1">
+              <span class="slider-hint">Links das Original, rechts die gewählte Ansicht. So sieht man, welche Stelle im Bild zu welcher Spur gehört.</span>
+            </label>
+            <div class="sliders" style="margin-top:4px">
+              <span class="slider-head">Darstellung</span>
+              <div class="chips" id="filterChips"></div>
+            </div>
+            <div class="pixel" id="pixelBox" hidden>
+              <span class="pixel-swatch" id="pixelSwatch"></span>
+              <span class="pixel-werte" id="pixelWerte"></span>
+            </div>
+            <p class="footnote">Auf das Bild tippen, um den genauen Farbwert eines Bildpunkts abzulesen.</p>
+          </div>
+        </div>
+
         <div class="btnrow">
           <button class="btn btn--ghost btn--sm" id="reanalyseBtn" type="button" disabled>Neu analysieren</button>
           <button class="btn btn--ghost btn--sm" id="detectStillBtn" type="button" disabled>Objekte erkennen</button>
+          <button class="btn btn--ghost btn--sm" id="annotBtn" type="button" disabled>Ansicht sichern</button>
           <button class="btn btn--ghost btn--sm" id="otherFileBtn" type="button">Anderes Bild</button>
           <button class="btn btn--ghost btn--sm" id="compareBtn" type="button" disabled>Mit Bild vergleichen</button>
           <button class="btn btn--ghost btn--sm" id="ghostBtn" type="button" disabled>Ghost-Analyse</button>
@@ -325,7 +345,7 @@
 
 <!-- ONNX Runtime liegt lokal bei: ein forensisches Werkzeug darf fuer seine
      Kernfunktion nicht auf eine Internetverbindung angewiesen sein. -->
-<script src="vendor/ort.min.js"></script>
+<script src="vendor/ort.wasm.min.js"></script>
 <script src="js/forensics.js"></script>
 <script src="js/detector.js"></script>
 <script src="js/skripte.js"></script>

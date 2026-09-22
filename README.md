@@ -142,12 +142,22 @@ Für iOS: `npx cap sync ios`, dann `ios/App/App.xcworkspace` in Xcode öffnen.
 ## Tests
 
 ```bash
-node tools/test-forensics.mjs    # 40 Prüfungen
-node tools/test-detector.mjs     # 16 Prüfungen
+node tools/test-forensics.mjs    # 83 Prüfungen, reine Rechnerei
+node tools/test-detector.mjs     # 16 Prüfungen, Letterbox und NMS
+node tools/test-skripte.mjs      # 19 Prüfungen, Sandkasten und Vertrag
+PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers \
+  node tools/test-browser.mjs    # 33 Prüfungen im echten Chromium
 ```
 
 Die Referenzwerte für Letterbox und Rückrechnung stammen aus einer
 Python-Implementierung, die gegen das echte ONNX-Modell gelaufen ist.
+
+**Der Browsertest ist der wichtigste.** Er lädt die Seite in Chromium, wartet
+auf die Erkennung, lässt sie über ein echtes Bild laufen und prüft die
+Treffer. Zwei Fehler sind ohne ihn bis aufs Gerät durchgerutscht: ein
+Worker-Pfad, der relativ zur falschen Datei aufgelöst wurde, und ein
+Laufzeit-Bündel, das nicht zu den mitgelieferten `.wasm`-Dateien passte.
+Beide hätte er in Sekunden gefunden.
 
 ## Modell
 
@@ -168,9 +178,20 @@ und läuft clientseitig.
 
 ## Entscheidungen, die nicht zurückgedreht werden sollten
 
-**Laufzeitumgebung liegt lokal.** `www/vendor/` enthält ONNX Runtime und das
-WASM-Modul. Der WebGPU-Pfad bräuchte 28 MB statt 14 MB und ist auf
-Android-WebViews unzuverlässig; der WASM-Pfad läuft überall.
+**Laufzeitumgebung liegt lokal — und das Bündel muss zu den Dateien passen.**
+`www/vendor/` enthält ONNX Runtime und das WASM-Modul. Entscheidend ist die
+richtige Kombination, denn die Bündel erwarten unterschiedliche Laufzeitdateien:
+
+| Bündel | erwartet | Größe |
+|---|---|---|
+| `ort.min.js` | `…jsep.mjs` + `.jsep.wasm` | 27,6 MB |
+| **`ort.wasm.min.js`** | `…mjs` + `.wasm` | **13,6 MB** |
+| `ort.webgpu.min.js` | `…asyncify.*` | 26 MB |
+
+Gebündelt ist `ort.wasm.min.js` mit den passenden Dateien. `ort.min.js` ist
+trotz des Namens *nicht* der WASM-Build, sondern der Standard-Build mit jsep —
+diese Verwechslung legte die Erkennung still lahm, weil die erwartete
+`.jsep.mjs` schlicht fehlte.
 
 **Ein Thread.** WebViews auf Android und iOS sind nicht cross-origin-isoliert.
 Ohne `SharedArrayBuffer` scheitert Multi-Threading hart, deshalb

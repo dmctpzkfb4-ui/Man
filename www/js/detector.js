@@ -665,7 +665,7 @@
         catch (err) { return pfad; }
       }
       var ortBase = absolut(opts.wasmPaths || DEFAULT_ORT_BASE);
-      var ortUrl = absolut(opts.ortUrl || (opts.wasmPaths || DEFAULT_ORT_BASE) + 'ort.min.js');
+      var ortUrl = absolut(opts.ortUrl || (opts.wasmPaths || DEFAULT_ORT_BASE) + 'ort.wasm.min.js');
 
       return state.bridge.send('init', {
         modelUrl: new URL(opts.modelUrl, window.location.href).href,

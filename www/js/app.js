@@ -22,6 +22,7 @@
     bild: null, bitmap: null, layers: {}, layer: 'original',
     bericht: null, filter: null, ghosts: null,
     zoom: 1, panX: 0, panY: 0,
+    wisch: 1, darstellung: 'keine', pixel: null,
     log: []
   };
 
@@ -176,7 +177,7 @@
     var info = await window.Detector.init({
       modelUrl: m.url, labels: S.labels, inputSize: m.size,
       // Alles lokal: kein CDN, kein Netzverkehr waehrend der Analyse.
-      ortUrl: 'vendor/ort.min.js',
+      ortUrl: 'vendor/ort.wasm.min.js',
       wasmPaths: 'vendor/',
       preferBackend: 'wasm',
       onProgress: function (p) { if (p && p.text) $('brandSub').textContent = p.text; }
@@ -540,45 +541,224 @@
 
   /* ============================================================ Analyse */
 
+  /* ================================================ Darstellung der Analyse
+   * Reihenfolge beim Zeichnen:
+   *   1. Original
+   *   2. gewählte Ebene, auf die rechte Seite des Wischreglers beschnitten
+   *   3. Darstellungsfilter über das Ganze
+   *   4. Erkennungsrahmen
+   * ====================================================================== */
+
+  var FILTER = [
+    ['keine',    'Original'],
+    ['grau',     'Graustufen'],
+    ['r',        'nur Rot'],
+    ['g',        'nur Grün'],
+    ['b',        'nur Blau'],
+    ['kontrast', 'Kontrast gespreizt'],
+    ['invers',   'Invertiert']
+  ];
+
+  /**
+   * Wendet einen Darstellungsfilter auf die Leinwand an.
+   * Kontrastspreizung normiert auf das tatsächlich belegte Werteintervall -
+   * dadurch werden Unterschiede sichtbar, die im Original zu flach liegen.
+   */
+  function wendeFilterAn(g, w, h) {
+    if (S.darstellung === 'keine') return;
+    var img;
+    try { img = g.getImageData(0, 0, w, h); } catch (e) { return; }
+    var d = img.data, i;
+
+    if (S.darstellung === 'kontrast') {
+      var min = 255, max = 0;
+      for (i = 0; i < d.length; i += 4) {
+        var l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+        if (l < min) min = l;
+        if (l > max) max = l;
+      }
+      var spanne = Math.max(1, max - min);
+      for (i = 0; i < d.length; i += 4) {
+        d[i]     = (d[i] - min) / spanne * 255;
+        d[i + 1] = (d[i + 1] - min) / spanne * 255;
+        d[i + 2] = (d[i + 2] - min) / spanne * 255;
+      }
+    } else {
+      for (i = 0; i < d.length; i += 4) {
+        var r = d[i], gr = d[i + 1], b = d[i + 2];
+        switch (S.darstellung) {
+          case 'grau':   var y = 0.299 * r + 0.587 * gr + 0.114 * b;
+                         d[i] = d[i + 1] = d[i + 2] = y; break;
+          case 'r':      d[i + 1] = d[i + 2] = 0; break;
+          case 'g':      d[i] = d[i + 2] = 0; break;
+          case 'b':      d[i] = d[i + 1] = 0; break;
+          case 'invers': d[i] = 255 - r; d[i + 1] = 255 - gr; d[i + 2] = 255 - b; break;
+        }
+      }
+    }
+    g.putImageData(img, 0, 0);
+  }
+
   function zeichneLayer() {
     var c = $('analyseCanvas');
+    if (!S.bitmap) return;
+    var W = S.bitmap.width, H = S.bitmap.height;
     var data = S.layers[S.layer];
-    var g = c.getContext('2d');
-    if (S.layer === 'original' && S.bitmap) {
-      c.width = S.bitmap.width; c.height = S.bitmap.height;
-      g.drawImage(S.bitmap, 0, 0);
-    } else if (data) {
-      c.width = data.width; c.height = data.height;
-      g.putImageData(data, 0, 0);
+
+    // Ebenen können kleiner sein als das Original (Arbeitsauflösung).
+    if (data && S.layer !== 'original') { W = data.width; H = data.height; }
+    if (c.width !== W || c.height !== H) { c.width = W; c.height = H; }
+    var g = c.getContext('2d', { willReadFrequently: true });
+    g.clearRect(0, 0, W, H);
+
+    // 1. Original als Grundlage
+    g.drawImage(S.bitmap, 0, 0, W, H);
+
+    // 2. Ebene, auf die rechte Seite beschnitten
+    if (data && S.layer !== 'original') {
+      var grenze = Math.round(W * S.wisch);
+      if (grenze > 0) {
+        var tmp = document.createElement('canvas');
+        tmp.width = data.width; tmp.height = data.height;
+        tmp.getContext('2d').putImageData(data, 0, 0);
+        g.save();
+        g.beginPath();
+        g.rect(W - grenze, 0, grenze, H);
+        g.clip();
+        g.drawImage(tmp, 0, 0, W, H);
+        g.restore();
+        if (S.wisch < 1) {
+          g.strokeStyle = 'rgba(111,194,222,.9)';
+          g.lineWidth = Math.max(1, W / 600);
+          g.beginPath(); g.moveTo(W - grenze, 0); g.lineTo(W - grenze, H); g.stroke();
+        }
+      }
     }
+
+    // 3. Darstellungsfilter
+    wendeFilterAn(g, W, H);
+
+    // 4. Erkennungsrahmen - nur wenn die Ebene das Originalbild zeigt
     if (S.lastHits.length && S.layer === 'original') {
-      g.lineWidth = Math.max(2, c.width / 400);
-      g.font = '600 ' + Math.max(12, c.width / 45) + 'px ui-monospace, monospace';
+      var f = W / S.bitmap.width;
+      g.lineWidth = Math.max(2, W / 400);
+      g.font = '600 ' + Math.max(12, W / 45) + 'px ui-monospace, monospace';
       g.textBaseline = 'top';
-      S.lastHits.forEach(function (d) {
-        var farbe = 'hsl(' + ((d.classId * 47) % 360) + ' 70% 62%)';
-        g.strokeStyle = farbe; g.strokeRect(d.x, d.y, d.w, d.h);
+      S.lastHits.forEach(function (d2) {
+        var farbe = 'hsl(' + ((d2.classId * 47) % 360) + ' 70% 62%)';
+        g.strokeStyle = farbe;
+        g.strokeRect(d2.x * f, d2.y * f, d2.w * f, d2.h * f);
         g.fillStyle = farbe;
-        var txt = d.label + ' ' + Math.round(d.score * 100) + '%';
-        var hh = Math.max(16, c.width / 38);
-        g.fillRect(d.x, Math.max(0, d.y - hh), g.measureText(txt).width + 12, hh);
-        g.fillStyle = '#06171E'; g.fillText(txt, d.x + 6, Math.max(0, d.y - hh) + 2);
+        var txt = d2.label + ' ' + Math.round(d2.score * 100) + '%';
+        var hh = Math.max(16, W / 38);
+        g.fillRect(d2.x * f, Math.max(0, d2.y * f - hh), g.measureText(txt).width + 12, hh);
+        g.fillStyle = '#06171E';
+        g.fillText(txt, d2.x * f + 6, Math.max(0, d2.y * f - hh) + 2);
       });
     }
-    var scale = $('analyseScale');
-    var hinweis = { original: '', ela: 'Helle Bereiche wurden anders komprimiert als ihre Umgebung.',
+
+    var hinweis = {
+      original: '',
+      ela: 'Helle Bereiche wurden anders komprimiert als ihre Umgebung.',
       noise: 'Dunkle, glatte Zonen deuten auf Weichzeichnung oder Retusche.',
       copymove: 'Rot markierte Blöcke gleichen weit entfernten Blöcken.',
       blockraster: 'Rot markierte Kacheln haben ein anders ausgerichtetes 8×8-Raster als das Gesamtbild.',
-      ghosts: 'Farbe je Kachel nach der Qualitätsstufe, bei der ihre Differenz einbricht. Ein abweichend gefärbter, zusammenhängender Bereich ist verdächtig.' };
+      ghosts: 'Farbe je Kachel nach der Qualitätsstufe, bei der ihre Differenz einbricht.'
+    };
     $('segNote').textContent = hinweis[S.layer] || '';
-    scale.hidden = true;
+    $('wischBox').hidden = (S.layer === 'original');
+    $('analyseScale').hidden = true;
+  }
+
+  /* ------------------------------------------------ Bildpunkt ablesen */
+
+  function rgbZuHsl(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    var max = Math.max(r, g, b), min = Math.min(r, g, b);
+    var h = 0, s = 0, l = (max + min) / 2;
+    if (max !== min) {
+      var d = max - min;
+      s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+      if (max === r) h = ((g - b) / d + (g < b ? 6 : 0));
+      else if (max === g) h = (b - r) / d + 2;
+      else h = (r - g) / d + 4;
+      h *= 60;
+    }
+    return [Math.round(h), Math.round(s * 100), Math.round(l * 100)];
+  }
+
+  function leseBildpunkt(clientX, clientY) {
+    var c = $('analyseCanvas');
+    if (!S.bitmap || !c.width) return;
+    var r = c.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    // Das Rechteck enthält Zoom und Verschiebung bereits - deshalb genügt
+    // der Dreisatz und es braucht keine eigene Umrechnung der Transformation.
+    var x = Math.floor((clientX - r.left) / r.width * c.width);
+    var y = Math.floor((clientY - r.top) / r.height * c.height);
+    if (x < 0 || y < 0 || x >= c.width || y >= c.height) return;
+
+    var p;
+    try { p = c.getContext('2d', { willReadFrequently: true }).getImageData(x, y, 1, 1).data; }
+    catch (e) { return; }
+
+    var hex = '#' + [p[0], p[1], p[2]].map(function (v) {
+      return v.toString(16).padStart(2, '0');
+    }).join('').toUpperCase();
+    var hsl = rgbZuHsl(p[0], p[1], p[2]);
+    // Auf das Originalbild zurückrechnen, falls die Ebene kleiner ist.
+    var ox = Math.round(x / c.width * S.bitmap.width);
+    var oy = Math.round(y / c.height * S.bitmap.height);
+
+    S.pixel = { x: ox, y: oy, r: p[0], g: p[1], b: p[2], hex: hex, hsl: hsl };
+    $('pixelBox').hidden = false;
+    $('pixelSwatch').style.background = hex;
+    $('pixelWerte').innerHTML =
+      '<b>' + hex + '</b>  ·  RGB ' + p[0] + ', ' + p[1] + ', ' + p[2] + '<br>' +
+      'HSL ' + hsl[0] + '°, ' + hsl[1] + ' %, ' + hsl[2] + ' %  ·  Punkt ' + ox + ', ' + oy;
+  }
+
+  function sichereAnsicht() {
+    var c = $('analyseCanvas');
+    if (!c.width) return;
+    c.toBlob(function (b) {
+      if (!b) { toast('Ansicht konnte nicht gesichert werden.'); return; }
+      var name = (S.bericht && S.bericht.dateiname || 'bild').replace(/\.[^.]+$/, '');
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = 'ansicht-' + name + '-' + S.layer +
+        (S.darstellung !== 'keine' ? '-' + S.darstellung : '') + '.png';
+      a.click();
+      setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+      log('export', 'Ansicht gesichert', a.download);
+    }, 'image/png');
+  }
+
+  function baueFilterChips() {
+    var box = $('filterChips');
+    box.textContent = '';
+    FILTER.forEach(function (f) {
+      var b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'chip' + (S.darstellung === f[0] ? ' is-on' : '');
+      b.textContent = f[1];
+      b.addEventListener('click', function () {
+        S.darstellung = f[0];
+        baueFilterChips();
+        zeichneLayer();
+      });
+      box.appendChild(b);
+    });
   }
 
   async function analysiere(datei) {
     if (!window.Forensics) { toast('forensics.js wurde nicht geladen.'); return; }
     S.bild = datei;
     S.lastHits = [];
+    // Den Reiter selbst setzen, statt sich auf den Aufrufer zu verlassen:
+    // sonst hat die Leinwand keine Ausmaße und alles, was von ihrer Größe
+    // abhängt - Bildpunkt ablesen, Zoom - greift ins Leere.
+    go('analyse');
     $('analyseVeil').hidden = true;
     $('analyseProgress').hidden = false;
     var bar = $('analyseProgressBar');
@@ -596,6 +776,12 @@
     S.layer = 'original';
     zoomZurueck();
     $('zoomBar').hidden = false;
+    $('ansichtPanel').hidden = false;
+    $('annotBtn').disabled = false;
+    $('pixelBox').hidden = true;
+    S.pixel = null;
+    S.wisch = 1; $('wischRange').value = 100; $('wischVal').textContent = '100 %';
+    S.darstellung = 'keine'; baueFilterChips();
     zeichneLayer();
     document.querySelectorAll('#viewSeg button').forEach(function (b) { b.disabled = false; });
     $('reanalyseBtn').disabled = false;
@@ -777,10 +963,17 @@
       return { x: e.clientX - r.left, y: e.clientY - r.top };
     }
 
+    var tippStart = null, gezogen = false;
+
     stage.addEventListener('pointerdown', function (e) {
       if (!S.bitmap) return;
-      stage.setPointerCapture(e.pointerId);
+      // Zustand ZUERST setzen: setPointerCapture wirft bei ungültiger
+      // Zeiger-ID, und danach liefe der Rest dieses Griffs nicht mehr -
+      // dann ginge weder Verschieben noch das Ablesen eines Bildpunkts.
+      tippStart = { x: e.clientX, y: e.clientY };
+      gezogen = false;
       zeiger.set(e.pointerId, lokal(e));
+      try { stage.setPointerCapture(e.pointerId); } catch (err) { /* nicht kritisch */ }
       if (zeiger.size === 2) {
         var p = Array.from(zeiger.values());
         startAbstand = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
@@ -793,6 +986,10 @@
 
     stage.addEventListener('pointermove', function (e) {
       if (!zeiger.has(e.pointerId)) return;
+      // Ein paar Pixel Wackeln beim Antippen sind normal und dürfen nicht
+      // als Verschieben gelten - sonst wäre das Ablesen unbenutzbar.
+      if (tippStart && (Math.abs(e.clientX - tippStart.x) > 6 ||
+                        Math.abs(e.clientY - tippStart.y) > 6)) gezogen = true;
       zeiger.set(e.pointerId, lokal(e));
       if (zeiger.size === 2 && startAbstand > 0) {
         var p = Array.from(zeiger.values());
@@ -809,9 +1006,12 @@
     });
 
     function ende(e) {
+      var warEinzeln = zeiger.size === 1;
       zeiger.delete(e.pointerId);
       if (zeiger.size < 2) startAbstand = 0;
       if (!zeiger.size) stage.classList.remove('is-panning');
+      if (warEinzeln && !gezogen && tippStart) leseBildpunkt(e.clientX, e.clientY);
+      tippStart = null;
     }
     stage.addEventListener('pointerup', ende);
     stage.addEventListener('pointercancel', ende);
@@ -1500,7 +1700,7 @@
       c.toBlob(function (b) {
         if (!b) return;
         b.name = S.quelle === 'bildschirm' ? 'Bildschirmaufnahme.jpg' : 'Kamerabild.jpg';
-        go('analyse'); analysiere(b);
+        analysiere(b);
       }, 'image/jpeg', 0.95);
     });
 
@@ -1562,6 +1762,13 @@
       this.value = '';
     });
     $('reportBtn').addEventListener('click', sichereBericht);
+    $('annotBtn').addEventListener('click', sichereAnsicht);
+    baueFilterChips();
+    $('wischRange').addEventListener('input', function () {
+      S.wisch = this.value / 100;
+      $('wischVal').textContent = this.value + ' %';
+      zeichneLayer();
+    });
     $('ghostBtn').addEventListener('click', starteGhosts);
 
     $('classSearch').addEventListener('input', function () { baueKlassenChips(this.value); });
