@@ -305,6 +305,9 @@
 
   // Tags in IFD0/IFD1 (TIFF-Basis)
   var TAGS_IFD0 = {
+    // Zeiger auf das eingebettete Vorschaubild in IFD1 - ohne diese
+    // beiden Tags laesst sich das Thumbnail nicht herausloesen.
+    0x0201: 'jpegInterchangeFormat', 0x0202: 'jpegInterchangeFormatLength',
     0x0100: 'imageWidth', 0x0101: 'imageHeight', 0x0102: 'bitsPerSample', 0x0103: 'compression',
     0x0106: 'photometricInterpretation', 0x010E: 'imageDescription', 0x010F: 'make', 0x0110: 'model',
     0x0112: 'orientation', 0x011A: 'xResolution', 0x011B: 'yResolution', 0x0128: 'resolutionUnit',
@@ -484,7 +487,16 @@
    * Süd und West ergeben negative Werte. Ungültige Eingabe -> null.
    */
   function dmsToDecimal(parts, ref) {
+    // Fehlende Werte duerfen NIEMALS zu einer Koordinate werden: Number(null)
+    // ist 0 und gilt als endlich, wodurch aus einer luecken- haften Datei ein
+    // erfundener Standort entstuende. In einem forensischen Werkzeug ist das
+    // der schwerste denkbare Fehler - lieber gar keine Angabe.
+    if (parts === null || parts === undefined) return null;
     var a = Array.isArray(parts) ? parts : [parts];
+    if (!a.length) return null;
+    for (var gi = 0; gi < Math.min(a.length, 3); gi++) {
+      if (a[gi] === null || a[gi] === undefined || a[gi] === '') return null;
+    }
     var d = Number(a[0]), m = Number(a.length > 1 ? a[1] : 0), s = Number(a.length > 2 ? a[2] : 0);
     if (!isFinite(d) || !isFinite(m) || !isFinite(s)) return null;
     var dec = Math.abs(d) + Math.abs(m) / 60 + Math.abs(s) / 3600;
@@ -518,3 +530,854 @@
     }
     return { lat: lat, lon: lon, alt: alt };
   }
+
+  /* =========================================================================
+   * 3. Container: JPEG-Segmente, PNG-Chunks, WebP-Chunks
+   * ========================================================================= */
+
+  /** Erkennt das Dateiformat an der Signatur. */
+  function detectFormat(bytes) {
+    if (!bytes || bytes.length < 4) return 'unbekannt';
+    if (bytes[0] === 0xFF && bytes[1] === 0xD8 && bytes[2] === 0xFF) return 'JPEG';
+    if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4E && bytes[3] === 0x47) return 'PNG';
+    if (bytes.length >= 12 && hasSignature(bytes, 0, 'RIFF') && hasSignature(bytes, 8, 'WEBP')) return 'WebP';
+    return 'unbekannt';
+  }
+
+  /**
+   * Läuft alle JPEG-Segmente ab und sammelt, was forensisch interessant ist.
+   * Bricht bei SOS (Beginn der Bilddaten) ab.
+   */
+  function scanJpeg(bytes) {
+    var out = {
+      exifTiff: null, xmp: '', comments: [], width: 0, height: 0,
+      hasJfif: false, hasAdobeApp14: false, hasPhotoshopIrb: false, hasC2pa: false,
+      progressive: false, markers: [], quantTableCount: 0, iccChunks: 0, mpf: false
+    };
+    if (!bytes || bytes.length < 4 || bytes[0] !== 0xFF || bytes[1] !== 0xD8) return out;
+    var p = 2;
+    var guard = 0;
+    while (p < bytes.length - 1 && guard++ < 10000) {
+      if (bytes[p] !== 0xFF) { p++; continue; }              // Resynchronisieren
+      var marker = bytes[p + 1];
+      if (marker === 0xFF) { p++; continue; }                // Füllbytes
+      if (marker === 0x01 || (marker >= 0xD0 && marker <= 0xD9)) { p += 2; continue; }
+      if (p + 4 > bytes.length) break;
+      var len = (bytes[p + 2] << 8) | bytes[p + 3];
+      if (len < 2) break;
+      var segStart = p + 4;
+      var segEnd = Math.min(p + 2 + len, bytes.length);
+      out.markers.push(marker);
+
+      // Bildmaße aus dem Frame-Header (SOF0..SOF15, ohne DHT/JPG/DAC)
+      if (marker >= 0xC0 && marker <= 0xCF && marker !== 0xC4 && marker !== 0xC8 && marker !== 0xCC) {
+        if (segStart + 5 <= bytes.length) {
+          out.height = (bytes[segStart + 1] << 8) | bytes[segStart + 2];
+          out.width = (bytes[segStart + 3] << 8) | bytes[segStart + 4];
+        }
+        if (marker === 0xC2) out.progressive = true;
+      } else if (marker === 0xDB) {
+        out.quantTableCount++;
+      } else if (marker === 0xE0 && hasSignature(bytes, segStart, 'JFIF')) {
+        out.hasJfif = true;
+      } else if (marker === 0xE1) {
+        if (hasSignature(bytes, segStart, 'Exif') && bytes[segStart + 4] === 0x00) {
+          if (!out.exifTiff) out.exifTiff = bytes.subarray(segStart + 6, segEnd);
+        } else if (hasSignature(bytes, segStart, 'http://ns.adobe.com/xap/1.0/')) {
+          out.xmp += bytesToLatin1(bytes, segStart + 29, segEnd - segStart - 29);
+        }
+      } else if (marker === 0xE2) {
+        if (hasSignature(bytes, segStart, 'ICC_PROFILE')) out.iccChunks++;
+        if (hasSignature(bytes, segStart, 'MPF')) out.mpf = true;
+      } else if (marker === 0xEB || marker === 0xEC) {
+        // APP11/APP12 – hier liegt bei C2PA/"Content Credentials" der JUMBF-Kasten
+        var probe = bytesToLatin1(bytes, segStart, Math.min(64, segEnd - segStart));
+        if (/jumb|c2pa/i.test(probe)) out.hasC2pa = true;
+      } else if (marker === 0xED && hasSignature(bytes, segStart, 'Photoshop 3.0')) {
+        out.hasPhotoshopIrb = true;
+      } else if (marker === 0xEE && hasSignature(bytes, segStart, 'Adobe')) {
+        out.hasAdobeApp14 = true;
+      } else if (marker === 0xFE) {
+        var c = bytesToLatin1(bytes, segStart, segEnd - segStart).trim();
+        if (c) out.comments.push(c);
+      }
+
+      if (marker === 0xDA) break;      // ab hier kommen die komprimierten Bilddaten
+      p = p + 2 + len;
+    }
+    return out;
+  }
+
+  /** Entpackt zlib/deflate-Daten, sofern die Umgebung DecompressionStream kennt. */
+  async function inflate(bytes) {
+    if (typeof DecompressionStream === 'undefined' || typeof Response === 'undefined' || typeof Blob === 'undefined') return null;
+    try {
+      var stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate'));
+      var buf = await new Response(stream).arrayBuffer();
+      return new Uint8Array(buf);
+    } catch (e) { return null; }
+  }
+
+  /**
+   * PNG: Chunks durchlaufen. IHDR (Maße), tEXt/zTXt/iTXt (Textfelder),
+   * eXIf (vollwertiger EXIF-Block), tIME (Änderungszeit).
+   */
+  async function scanPng(bytes) {
+    var out = { width: 0, height: 0, bitDepth: 0, colorType: -1, text: {}, exifTiff: null, xmp: '', time: '', chunks: [], interlace: 0 };
+    if (!bytes || bytes.length < 16) return out;
+    var p = 8;
+    var guard = 0;
+    var dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    while (p + 8 <= bytes.length && guard++ < 5000) {
+      var len = dv.getUint32(p, false);
+      var type = bytesToLatin1(bytes, p + 4, 4);
+      var dataStart = p + 8;
+      if (len > bytes.length || dataStart + len > bytes.length) break;   // abgeschnittene Datei
+      out.chunks.push(type);
+      if (type === 'IHDR' && len >= 13) {
+        out.width = dv.getUint32(dataStart, false);
+        out.height = dv.getUint32(dataStart + 4, false);
+        out.bitDepth = bytes[dataStart + 8];
+        out.colorType = bytes[dataStart + 9];
+        out.interlace = bytes[dataStart + 12];
+      } else if (type === 'tEXt') {
+        var z = indexOfByte(bytes, 0, dataStart, dataStart + len);
+        if (z > 0) {
+          var kw = bytesToLatin1(bytes, dataStart, z - dataStart);
+          out.text[kw] = bytesToLatin1(bytes, z + 1, dataStart + len - z - 1);
+        }
+      } else if (type === 'zTXt') {
+        var z2 = indexOfByte(bytes, 0, dataStart, dataStart + len);
+        if (z2 > 0) {
+          var kw2 = bytesToLatin1(bytes, dataStart, z2 - dataStart);
+          var comp = await inflate(bytes.subarray(z2 + 2, dataStart + len));
+          if (comp) out.text[kw2] = bytesToLatin1(comp, 0, comp.length);
+        }
+      } else if (type === 'iTXt') {
+        var parsed = parseITxt(bytes, dataStart, dataStart + len);
+        if (parsed) {
+          if (parsed.compressed) {
+            var raw = await inflate(parsed.rawText);
+            if (raw) out.text[parsed.keyword] = bytesToLatin1(raw, 0, raw.length);
+          } else {
+            out.text[parsed.keyword] = parsed.text;
+          }
+        }
+      } else if (type === 'eXIf') {
+        var start = dataStart;
+        if (hasSignature(bytes, start, 'Exif') && bytes[start + 4] === 0) start += 6;
+        out.exifTiff = bytes.subarray(start, dataStart + len);
+      } else if (type === 'tIME' && len >= 7) {
+        out.time = dv.getUint16(dataStart, false) + ':' + pad2(bytes[dataStart + 2]) + ':' + pad2(bytes[dataStart + 3]) +
+                   ' ' + pad2(bytes[dataStart + 4]) + ':' + pad2(bytes[dataStart + 5]) + ':' + pad2(bytes[dataStart + 6]);
+      }
+      if (type === 'IEND') break;
+      p = dataStart + len + 4;   // + CRC
+    }
+    if (out.text['XML:com.adobe.xmp']) out.xmp = out.text['XML:com.adobe.xmp'];
+    return out;
+  }
+
+  function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+  function indexOfByte(bytes, needle, from, to) {
+    var end = Math.min(to, bytes.length);
+    for (var i = from; i < end; i++) if (bytes[i] === needle) return i;
+    return -1;
+  }
+
+  /** iTXt-Chunk zerlegen: Keyword \0 Flag Methode Sprache \0 ÜbersetztesKeyword \0 Text */
+  function parseITxt(bytes, start, end) {
+    var z1 = indexOfByte(bytes, 0, start, end);
+    if (z1 < 0 || z1 + 2 >= end) return null;
+    var keyword = bytesToLatin1(bytes, start, z1 - start);
+    var compressed = bytes[z1 + 1] === 1;
+    var z2 = indexOfByte(bytes, 0, z1 + 3, end);      // Ende Sprach-Tag
+    if (z2 < 0) return null;
+    var z3 = indexOfByte(bytes, 0, z2 + 1, end);      // Ende übersetztes Keyword
+    if (z3 < 0) return null;
+    var textStart = z3 + 1;
+    if (compressed) return { keyword: keyword, compressed: true, rawText: bytes.subarray(textStart, end) };
+    return { keyword: keyword, compressed: false, text: utf8ToString(bytes.subarray(textStart, end)) };
+  }
+
+  /** UTF-8-Bytes zu String (TextDecoder wenn vorhanden, sonst Latin-1-Notlösung). */
+  function utf8ToString(bytes) {
+    try {
+      if (typeof TextDecoder !== 'undefined') return new TextDecoder('utf-8').decode(bytes);
+    } catch (e) { /* weiter unten */ }
+    return bytesToLatin1(bytes, 0, bytes.length);
+  }
+
+  /** WebP: RIFF-Chunks durchlaufen (VP8X-Maße, EXIF-Chunk, XMP-Chunk). */
+  function scanWebp(bytes) {
+    var out = { width: 0, height: 0, exifTiff: null, xmp: '', chunks: [], hasAlpha: false, animated: false, lossless: false };
+    if (!bytes || bytes.length < 16) return out;
+    var dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    var p = 12;
+    var guard = 0;
+    while (p + 8 <= bytes.length && guard++ < 2000) {
+      var fourcc = bytesToLatin1(bytes, p, 4);
+      var size = dv.getUint32(p + 4, true);
+      var dataStart = p + 8;
+      if (size > bytes.length || dataStart + size > bytes.length) {
+        size = bytes.length - dataStart;        // abgeschnitten: Rest nehmen
+        if (size < 0) break;
+      }
+      out.chunks.push(fourcc);
+      if (fourcc === 'VP8X' && size >= 10) {
+        out.hasAlpha = !!(bytes[dataStart] & 0x10);
+        out.animated = !!(bytes[dataStart] & 0x02);
+        out.width = 1 + (bytes[dataStart + 4] | (bytes[dataStart + 5] << 8) | (bytes[dataStart + 6] << 16));
+        out.height = 1 + (bytes[dataStart + 7] | (bytes[dataStart + 8] << 8) | (bytes[dataStart + 9] << 16));
+      } else if (fourcc === 'VP8 ' && size >= 10 && !out.width) {
+        // Lossy: Keyframe-Header, Maße als 14 Bit
+        out.width = dv.getUint16(dataStart + 6, true) & 0x3FFF;
+        out.height = dv.getUint16(dataStart + 8, true) & 0x3FFF;
+      } else if (fourcc === 'VP8L' && size >= 5 && !out.width) {
+        out.lossless = true;
+        var b1 = bytes[dataStart + 1], b2 = bytes[dataStart + 2], b3 = bytes[dataStart + 3], b4 = bytes[dataStart + 4];
+        out.width = 1 + (((b2 & 0x3F) << 8) | b1);
+        out.height = 1 + (((b4 & 0x0F) << 10) | (b3 << 2) | ((b2 & 0xC0) >> 6));
+      } else if (fourcc === 'EXIF') {
+        var s = dataStart;
+        if (hasSignature(bytes, s, 'Exif') && bytes[s + 4] === 0) s += 6;
+        out.exifTiff = bytes.subarray(s, dataStart + size);
+      } else if (fourcc === 'XMP ') {
+        out.xmp = utf8ToString(bytes.subarray(dataStart, dataStart + size));
+      }
+      p = dataStart + size + (size & 1);   // Chunks sind auf gerade Länge aufgefüllt
+    }
+    return out;
+  }
+
+  /* =========================================================================
+   * 4. Zeichenfläche: funktioniert im Fenster wie im Worker
+   * ========================================================================= */
+
+  function makeCanvas(w, h) {
+    if (typeof OffscreenCanvas === 'function') return new OffscreenCanvas(w, h);
+    if (typeof document !== 'undefined') {
+      var c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      return c;
+    }
+    return null;
+  }
+
+  /** Zeichnet eine Bildquelle auf eine Leinwand und liefert die Pixel. */
+  function drawToImageData(src, w, h) {
+    var c = makeCanvas(w, h);
+    if (!c) return null;
+    var g = c.getContext('2d', { willReadFrequently: true });
+    if (!g) return null;
+    g.drawImage(src, 0, 0, w, h);
+    try { return g.getImageData(0, 0, w, h); } catch (e) { return null; }
+  }
+
+  /** Kodiert eine Leinwand als JPEG-Blob. Rückgabe null statt Ausnahme. */
+  async function canvasToJpegBlob(canvas, quality) {
+    try {
+      if (typeof canvas.convertToBlob === 'function') {
+        return await canvas.convertToBlob({ type: 'image/jpeg', quality: quality });
+      }
+      return await new Promise(function (res) {
+        canvas.toBlob(function (b) { res(b); }, 'image/jpeg', quality);
+      });
+    } catch (e) { return null; }
+  }
+
+  /**
+   * Begrenzt die Arbeitsauflösung. Forensische Verfahren sind pro Pixel teuer;
+   * oberhalb ~1600px bringt mehr Auflösung keine zusätzliche Aussage, kostet
+   * aber quadratisch Zeit und kann schwache Geräte zum Stillstand bringen.
+   */
+  function workSize(w, h, max) {
+    max = max || 1600;
+    if (w <= max && h <= max) return { w: w, h: h, scaled: false };
+    var f = Math.min(max / w, max / h);
+    return { w: Math.max(1, Math.round(w * f)), h: Math.max(1, Math.round(h * f)), scaled: true };
+  }
+
+  /* =========================================================================
+   * 5. Metadaten lesen + forensische Hinweise ableiten
+   * ========================================================================= */
+
+  var LESBAR = {
+    make: 'Hersteller', model: 'Kameramodell', lensModel: 'Objektiv',
+    software: 'Software', artist: 'Urheber', copyright: 'Copyright',
+    imageDescription: 'Bildbeschreibung',
+    dateTimeOriginal: 'Aufnahmezeitpunkt', dateTimeDigitized: 'Digitalisiert',
+    dateTime: 'Zuletzt geändert', orientation: 'Ausrichtung',
+    exposureTime: 'Belichtungszeit', fNumber: 'Blende',
+    isoSpeedRatings: 'ISO', photographicSensitivity: 'ISO',
+    focalLength: 'Brennweite', focalLengthIn35mmFilm: 'Brennweite (KB)',
+    flash: 'Blitz', whiteBalance: 'Weißabgleich', meteringMode: 'Messmethode',
+    exposureProgram: 'Belichtungsprogramm', exposureBiasValue: 'Belichtungskorrektur',
+    pixelXDimension: 'Breite (EXIF)', pixelYDimension: 'Höhe (EXIF)',
+    xResolution: 'Auflösung X', yResolution: 'Auflösung Y'
+  };
+
+  /** Formatiert einen Rohwert für die Anzeige, mit passender Einheit. */
+  function formatTag(key, value, rat) {
+    if (value === undefined || value === null) return null;
+    if (value instanceof Uint8Array) return null;
+    if (Array.isArray(value)) value = value.join(', ');
+
+    if (key === 'exposureTime' && typeof value === 'number' && value > 0) {
+      return value >= 1 ? deNum(value, 1) + ' s' : '1/' + Math.round(1 / value) + ' s';
+    }
+    if (key === 'fNumber' && typeof value === 'number') return 'f/' + deNum(value, 1);
+    if (key === 'focalLength' || key === 'focalLengthIn35mmFilm') {
+      if (typeof value === 'number') return deNum(value, 0) + ' mm';
+    }
+    if (key === 'exposureBiasValue' && typeof value === 'number') {
+      return (value > 0 ? '+' : '') + deNum(value, 1) + ' EV';
+    }
+    if (key === 'orientation' && typeof value === 'number') {
+      var O = { 1: 'normal', 3: '180° gedreht', 6: '90° im Uhrzeigersinn', 8: '90° gegen Uhrzeigersinn' };
+      return O[value] || String(value);
+    }
+    if (typeof value === 'number') return deNum(value, 4);
+    var s = String(value).replace(/\0+$/, '').trim();
+    return s.length ? s : null;
+  }
+
+  /** EXIF-Zeitstempel "JJJJ:MM:TT hh:mm:ss" -> Date oder null. */
+  function exifDate(s) {
+    if (typeof s !== 'string') return null;
+    var m = s.match(/^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+    if (!m) return null;
+    var d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5], +m[6]);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  /** Bekannte Bearbeitungsprogramme im Software-Feld. */
+  var EDITOR_MUSTER = [
+    [/photoshop/i, 'Adobe Photoshop'], [/lightroom/i, 'Adobe Lightroom'],
+    [/gimp/i, 'GIMP'], [/affinity/i, 'Affinity Photo'], [/paint\.net/i, 'Paint.NET'],
+    [/snapseed/i, 'Snapseed'], [/picsart/i, 'PicsArt'], [/facetune/i, 'Facetune'],
+    [/capture one/i, 'Capture One'], [/luminar/i, 'Luminar'], [/darktable/i, 'darktable'],
+    [/canva/i, 'Canva'], [/imagemagick/i, 'ImageMagick'], [/ffmpeg/i, 'FFmpeg']
+  ];
+
+  async function readMetadata(fileOrBlob) {
+    var out = {
+      format: 'unbekannt', tags: {}, gps: null, thumbnail: null,
+      findings: [], width: 0, height: 0, raw: {}
+    };
+    try {
+      var bytes = await toBytes(fileOrBlob);
+      if (!bytes || !bytes.length) {
+        addFinding(out.findings, 'warn', 'Die Datei ist leer oder konnte nicht gelesen werden.');
+        return out;
+      }
+      out.format = detectFormat(bytes);
+      if (out.format === 'unbekannt') {
+        addFinding(out.findings, 'warn',
+          'Das Dateiformat wurde nicht erkannt. Die Signatur passt weder zu JPEG, PNG noch WebP.');
+      }
+
+      var container = null, tiff = null;
+      if (out.format === 'JPEG') {
+        container = scanJpeg(bytes);
+      } else if (out.format === 'PNG') {
+        container = await scanPng(bytes);
+      } else if (out.format === 'WebP') {
+        container = scanWebp(bytes);
+      }
+
+      if (container) {
+        out.width = container.width || 0;
+        out.height = container.height || 0;
+        if (container.exifTiff) tiff = parseTiffBlock(container.exifTiff);
+      }
+
+      /* --- Tags in lesbare Form bringen --- */
+      if (tiff && tiff.ok) {
+        out.raw = tiff.raw;
+        for (var key in LESBAR) {
+          if (!Object.prototype.hasOwnProperty.call(LESBAR, key)) continue;
+          var v = formatTag(key, val(tiff.raw, key), ratios(tiff.raw, key));
+          if (v !== null && v !== '') out.tags[LESBAR[key]] = v;
+        }
+        out.gps = buildGps(tiff.gps);
+
+        /* --- eingebettetes Vorschaubild aus IFD1 --- */
+        try {
+          var off = val(tiff.ifd1, 'jpegInterchangeFormat');
+          var len = val(tiff.ifd1, 'jpegInterchangeFormatLength');
+          if (typeof off === 'number' && typeof len === 'number' && len > 0 &&
+              off + len <= tiff.tiff.length) {
+            out.thumbnail = bytesToBlob(tiff.tiff.subarray(off, off + len), 'image/jpeg');
+          }
+        } catch (e) { /* Vorschaubild ist optional */ }
+      } else if (tiff && tiff.error) {
+        addFinding(out.findings, 'warn', tiff.error);
+      }
+
+      /* --- PNG-Textfelder als Tags übernehmen --- */
+      if (out.format === 'PNG' && container && container.text) {
+        for (var tk in container.text) {
+          if (Object.prototype.hasOwnProperty.call(container.text, tk)) {
+            var tv = String(container.text[tk]).trim();
+            if (tv) out.tags['PNG: ' + tk] = tv.length > 300 ? tv.slice(0, 300) + '…' : tv;
+          }
+        }
+      }
+
+      if (out.width && out.height) out.tags['Abmessungen'] = out.width + ' × ' + out.height + ' px';
+
+      /* =====================================================================
+       * Befunde ableiten. Wichtig: das sind Hinweise, keine Beweise.
+       * Jede Formulierung muss das offenlassen - ein Foto ohne EXIF ist
+       * nicht gefälscht, es ist nur weiterverarbeitet worden.
+       * ===================================================================== */
+      var software = val(tiff && tiff.raw, 'software');
+      if (typeof software === 'string' && software.trim()) {
+        var erkannt = null;
+        for (var i = 0; i < EDITOR_MUSTER.length; i++) {
+          if (EDITOR_MUSTER[i][0].test(software)) { erkannt = EDITOR_MUSTER[i][1]; break; }
+        }
+        if (erkannt) {
+          addFinding(out.findings, 'alarm',
+            'Das Software-Feld nennt ' + erkannt + '. Die Datei wurde nach der Aufnahme durch ein ' +
+            'Bearbeitungsprogramm geschrieben. Das sagt nichts darüber aus, ob der Inhalt verändert wurde.');
+        } else {
+          addFinding(out.findings, 'info', 'Software-Feld: „' + software.trim() + '“.');
+        }
+      }
+
+      var hatKamera = val(tiff && tiff.raw, 'make') || val(tiff && tiff.raw, 'model');
+      if (!tiff || !tiff.ok) {
+        addFinding(out.findings, 'warn',
+          'Keine EXIF-Daten vorhanden. Typisch für Bildschirmfotos, heruntergeladene Bilder und ' +
+          'Dateien aus sozialen Netzwerken - diese entfernen Metadaten routinemäßig. Ein Hinweis, kein Verdacht.');
+      } else if (!hatKamera) {
+        addFinding(out.findings, 'warn',
+          'EXIF vorhanden, aber ohne Hersteller- und Modellangabe. Bei einer Kameraaufnahme wären diese Felder ' +
+          'normalerweise gefüllt.');
+      }
+
+      /* Zeitstempel gegeneinander prüfen */
+      var dOrig = exifDate(val(tiff && tiff.raw, 'dateTimeOriginal'));
+      var dMod = exifDate(val(tiff && tiff.raw, 'dateTime'));
+      if (dOrig && dMod) {
+        var diffMin = Math.round((dMod - dOrig) / 60000);
+        if (diffMin > 1) {
+          addFinding(out.findings, 'alarm',
+            'Der Änderungszeitpunkt liegt ' + (diffMin >= 1440
+              ? Math.round(diffMin / 1440) + ' Tage'
+              : diffMin >= 60 ? Math.round(diffMin / 60) + ' Stunden' : diffMin + ' Minuten') +
+            ' nach der Aufnahme. Die Datei wurde nach dem Fotografieren erneut geschrieben.');
+        }
+      }
+      if (dOrig && dOrig.getTime() > Date.now() + 86400000) {
+        addFinding(out.findings, 'alarm',
+          'Der Aufnahmezeitpunkt liegt in der Zukunft. Entweder war die Kamerauhr falsch gestellt ' +
+          'oder der Zeitstempel wurde nachträglich gesetzt.');
+      }
+
+      /* EXIF-Maße gegen tatsächliche Maße */
+      var ex = val(tiff && tiff.raw, 'pixelXDimension');
+      var ey = val(tiff && tiff.raw, 'pixelYDimension');
+      if (typeof ex === 'number' && typeof ey === 'number' && out.width && out.height) {
+        var gedreht = (ex === out.height && ey === out.width);
+        if (!gedreht && (ex !== out.width || ey !== out.height)) {
+          addFinding(out.findings, 'alarm',
+            'Die in EXIF vermerkten Maße (' + ex + ' × ' + ey + ') weichen von den tatsächlichen ' +
+            '(' + out.width + ' × ' + out.height + ') ab. Ein starker Hinweis auf nachträgliches ' +
+            'Zuschneiden oder Skalieren.');
+        }
+      }
+
+      if (tiff && tiff.ok && hatKamera && !out.thumbnail) {
+        addFinding(out.findings, 'warn',
+          'EXIF einer Kamera vorhanden, aber ohne eingebettetes Vorschaubild. Kameras legen dieses ' +
+          'normalerweise an; Bearbeitungsprogramme verwerfen es häufig.');
+      }
+      if (out.gps) {
+        addFinding(out.findings, 'info',
+          'Standortdaten enthalten: ' + deNum(out.gps.lat, 5) + ', ' + deNum(out.gps.lon, 5) +
+          (out.gps.alt !== null ? ' auf ' + deNum(out.gps.alt, 0) + ' m Höhe' : '') +
+          '. Vor einer Weitergabe der Datei bedenken.');
+      }
+
+      /* JPEG-spezifische Container-Spuren */
+      if (out.format === 'JPEG' && container) {
+        if (container.hasPhotoshopIrb) {
+          addFinding(out.findings, 'alarm',
+            'Die Datei enthält einen Photoshop-Ressourcenblock. Sie wurde von Adobe-Software geschrieben.');
+        }
+        if (container.hasC2pa) {
+          addFinding(out.findings, 'info',
+            'Ein C2PA-Herkunftsnachweis ist eingebettet. Dieser dokumentiert die Entstehungskette und ' +
+            'kann separat geprüft werden.');
+        }
+        if (container.progressive) {
+          addFinding(out.findings, 'info',
+            'Progressives JPEG. Im Web üblich, bei Kameras selten - deutet auf Weiterverarbeitung hin.');
+        }
+        if (container.comments && container.comments.length) {
+          for (var ci = 0; ci < Math.min(container.comments.length, 3); ci++) {
+            var cm = String(container.comments[ci]).trim();
+            if (cm) out.tags['JPEG-Kommentar ' + (ci + 1)] = cm.slice(0, 200);
+          }
+        }
+      }
+
+      if (!out.findings.length) {
+        addFinding(out.findings, 'info',
+          'Keine Auffälligkeiten in den Metadaten. Das schließt eine Bearbeitung nicht aus - ' +
+          'Metadaten lassen sich entfernen und fälschen.');
+      }
+    } catch (e) {
+      addFinding(out.findings, 'warn', 'Die Metadaten konnten nicht vollständig gelesen werden.');
+    }
+    return out;
+  }
+
+  /* =========================================================================
+   * 6. Error Level Analysis
+   *    Ein unverändertes JPEG ist bereits überall gleich stark komprimiert.
+   *    Wird es erneut gespeichert, verändern sich alle Bereiche gleichmäßig
+   *    wenig. Nachträglich eingefügte Bereiche hatten eine andere
+   *    Kompressionsvorgeschichte und verändern sich stärker - sie leuchten auf.
+   * ========================================================================= */
+
+  async function errorLevelAnalysis(source, opts) {
+    opts = opts || {};
+    var quality = typeof opts.quality === 'number' ? opts.quality : 0.90;
+    var scale = typeof opts.scale === 'number' ? opts.scale : 18;
+    var leer = { imageData: null, meanError: 0, maxError: 0, error: null };
+    try {
+      var w0 = source.width || source.videoWidth, h0 = source.height || source.videoHeight;
+      if (!w0 || !h0) { leer.error = 'Bild hat keine gültigen Maße.'; return leer; }
+      var s = workSize(w0, h0, 1400);
+
+      var c = makeCanvas(s.w, s.h);
+      if (!c) { leer.error = 'Keine Zeichenfläche verfügbar.'; return leer; }
+      var g = c.getContext('2d', { willReadFrequently: true });
+      g.drawImage(source, 0, 0, s.w, s.h);
+      var orig = g.getImageData(0, 0, s.w, s.h);
+
+      var blob = await canvasToJpegBlob(c, quality);
+      if (!blob) { leer.error = 'Erneute JPEG-Kodierung nicht möglich.'; return leer; }
+      await yieldToUi();
+
+      var bmp = await createImageBitmap(blob);
+      var again = drawToImageData(bmp, s.w, s.h);
+      if (bmp.close) bmp.close();
+      if (!again) { leer.error = 'Vergleichsbild konnte nicht gelesen werden.'; return leer; }
+
+      var a = orig.data, b = again.data, n = a.length;
+      var outData = new Uint8ClampedArray(n);
+      var summe = 0, maxE = 0, px = 0;
+      for (var i = 0; i < n; i += 4) {
+        var dr = Math.abs(a[i] - b[i]), dg = Math.abs(a[i + 1] - b[i + 1]), db = Math.abs(a[i + 2] - b[i + 2]);
+        var m = dr > dg ? (dr > db ? dr : db) : (dg > db ? dg : db);
+        if (m > maxE) maxE = m;
+        summe += m; px++;
+        outData[i] = dr * scale > 255 ? 255 : dr * scale;
+        outData[i + 1] = dg * scale > 255 ? 255 : dg * scale;
+        outData[i + 2] = db * scale > 255 ? 255 : db * scale;
+        outData[i + 3] = 255;
+      }
+      return {
+        imageData: new ImageData(outData, s.w, s.h),
+        meanError: px ? roundTo(summe / px, 3) : 0,
+        maxError: maxE,
+        scaled: s.scaled,
+        error: null
+      };
+    } catch (e) {
+      leer.error = 'Die Fehlerniveau-Analyse ist fehlgeschlagen.';
+      return leer;
+    }
+  }
+
+  /* =========================================================================
+   * 7. Histogramm
+   * ========================================================================= */
+
+  function histogram(imageData) {
+    var r = new Uint32Array(256), g = new Uint32Array(256),
+        b = new Uint32Array(256), luma = new Uint32Array(256);
+    var clippedLow = 0, clippedHigh = 0, total = 0;
+    try {
+      if (!imageData || !imageData.data) return { r: r, g: g, b: b, luma: luma, clippedLow: 0, clippedHigh: 0, total: 0 };
+      var d = imageData.data;
+      for (var i = 0; i < d.length; i += 4) {
+        var R = d[i], G = d[i + 1], B = d[i + 2];
+        r[R]++; g[G]++; b[B]++;
+        // Rec. 601 - entspricht der Helligkeitsempfindung besser als der Mittelwert
+        luma[(0.299 * R + 0.587 * G + 0.114 * B) | 0]++;
+        if (R === 0 && G === 0 && B === 0) clippedLow++;
+        else if (R === 255 && G === 255 && B === 255) clippedHigh++;
+        total++;
+      }
+    } catch (e) { /* leeres Histogramm zurückgeben */ }
+    return {
+      r: r, g: g, b: b, luma: luma,
+      clippedLow: clippedLow, clippedHigh: clippedHigh, total: total,
+      clippedLowPct: total ? roundTo(clippedLow / total * 100, 2) : 0,
+      clippedHighPct: total ? roundTo(clippedHigh / total * 100, 2) : 0
+    };
+  }
+
+  /* =========================================================================
+   * 8. Rauschrest
+   *    Jeder Sensor hinterlässt ein charakteristisches Rauschen. Retuschierte,
+   *    weichgezeichnete oder eingefügte Flächen haben ein abweichendes -
+   *    oder gar kein - Rauschen und erscheinen als ruhige Zonen.
+   * ========================================================================= */
+
+  async function noiseResidual(source, opts) {
+    opts = opts || {};
+    var scale = typeof opts.scale === 'number' ? opts.scale : 10;
+    var leer = { imageData: null, uniformity: 0, error: null };
+    try {
+      var w0 = source.width || source.videoWidth, h0 = source.height || source.videoHeight;
+      if (!w0 || !h0) { leer.error = 'Bild hat keine gültigen Maße.'; return leer; }
+      var s = workSize(w0, h0, 1200);
+      var src = drawToImageData(source, s.w, s.h);
+      if (!src) { leer.error = 'Bild konnte nicht gelesen werden.'; return leer; }
+
+      var d = src.data, W = s.w, H = s.h;
+      var grau = new Float32Array(W * H);
+      for (var i = 0, p = 0; i < d.length; i += 4, p++) {
+        grau[p] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      }
+
+      // Hochpass = Original minus 3x3-Mittelwert. Was bleibt, ist Rauschen und Kante.
+      var out = new Uint8ClampedArray(W * H * 4);
+      var summe = 0, summeQ = 0, cnt = 0;
+      for (var y = 1; y < H - 1; y++) {
+        for (var x = 1; x < W - 1; x++) {
+          var o = y * W + x;
+          var m = (grau[o - W - 1] + grau[o - W] + grau[o - W + 1] +
+                   grau[o - 1] + grau[o] + grau[o + 1] +
+                   grau[o + W - 1] + grau[o + W] + grau[o + W + 1]) / 9;
+          var rest = Math.abs(grau[o] - m) * scale;
+          summe += rest; summeQ += rest * rest; cnt++;
+          var v = rest > 255 ? 255 : rest;
+          var q = o * 4;
+          out[q] = v; out[q + 1] = v; out[q + 2] = v; out[q + 3] = 255;
+        }
+        if ((y & 63) === 0) await yieldToUi();
+      }
+      // Rand undurchsichtig setzen, sonst bleibt er transparent
+      for (var e = 0; e < W * H; e++) if (out[e * 4 + 3] === 0) out[e * 4 + 3] = 255;
+
+      var mittel = cnt ? summe / cnt : 0;
+      var varianz = cnt ? Math.max(0, summeQ / cnt - mittel * mittel) : 0;
+      // Gleichmäßigkeit: 1 = überall gleiches Rauschen, 0 = stark unterschiedlich
+      var uniformity = mittel > 0 ? roundTo(1 / (1 + Math.sqrt(varianz) / mittel), 3) : 0;
+
+      return { imageData: new ImageData(out, W, H), uniformity: uniformity, meanResidual: roundTo(mittel, 2), scaled: s.scaled, error: null };
+    } catch (e) {
+      leer.error = 'Die Rauschanalyse ist fehlgeschlagen.';
+      return leer;
+    }
+  }
+
+  /* =========================================================================
+   * 9. Copy-Move-Hinweis
+   *    Sucht Blöcke, die einander auffällig gleichen. Beim Stempeln oder
+   *    Klonen entstehen identische Regionen, die im Original nicht vorkommen.
+   *    Bewusst als "Hinweis" benannt: gleichförmige Flächen wie Himmel oder
+   *    weiße Wände erzeugen zwangsläufig Treffer, ohne dass etwas manipuliert
+   *    wurde. Solche Blöcke werden darum über die Varianz aussortiert.
+   * ========================================================================= */
+
+  async function copyMoveHint(source, opts) {
+    opts = opts || {};
+    var bs = Math.max(8, Math.min(32, opts.blockSize || 16));
+    var leer = { imageData: null, suspectBlocks: 0, error: null };
+    try {
+      var w0 = source.width || source.videoWidth, h0 = source.height || source.videoHeight;
+      if (!w0 || !h0) { leer.error = 'Bild hat keine gültigen Maße.'; return leer; }
+      var s = workSize(w0, h0, 900);
+      var src = drawToImageData(source, s.w, s.h);
+      if (!src) { leer.error = 'Bild konnte nicht gelesen werden.'; return leer; }
+
+      var d = src.data, W = s.w, H = s.h;
+      var cols = Math.floor(W / bs), rows = Math.floor(H / bs);
+      if (cols < 2 || rows < 2) { leer.error = 'Bild ist für diese Blockgröße zu klein.'; return leer; }
+
+      var tabelle = Object.create(null);
+      var blocks = [];
+      for (var by = 0; by < rows; by++) {
+        for (var bx = 0; bx < cols; bx++) {
+          var sum = 0, sumQ = 0, sig = new Array(16), si = 0;
+          // 4x4-Raster von Mittelwerten als Signatur - unempfindlich gegen leichtes Rauschen
+          var step = bs / 4;
+          for (var qy = 0; qy < 4; qy++) {
+            for (var qx = 0; qx < 4; qx++) {
+              var acc = 0, n2 = 0;
+              for (var yy = 0; yy < step; yy++) {
+                for (var xx = 0; xx < step; xx++) {
+                  var px = ((by * bs + qy * step + yy) | 0) * W + ((bx * bs + qx * step + xx) | 0);
+                  var o4 = px * 4;
+                  var gv = 0.299 * d[o4] + 0.587 * d[o4 + 1] + 0.114 * d[o4 + 2];
+                  acc += gv; n2++;
+                  sum += gv; sumQ += gv * gv;
+                }
+              }
+              sig[si++] = Math.round((acc / Math.max(1, n2)) / 4);   // grob quantisiert
+            }
+          }
+          var anz = bs * bs;
+          var mw = sum / anz;
+          var varz = Math.max(0, sumQ / anz - mw * mw);
+          // Strukturarme Blöcke (Himmel, Wand) taugen nicht als Beleg
+          if (varz < 40) { blocks.push(null); continue; }
+          var key = sig.join(',');
+          (tabelle[key] || (tabelle[key] = [])).push(blocks.length);
+          blocks.push({ bx: bx, by: by, key: key });
+        }
+        if ((by & 15) === 0) await yieldToUi();
+      }
+
+      var verdaechtig = Object.create(null), anzahl = 0;
+      for (var k in tabelle) {
+        var liste = tabelle[k];
+        if (liste.length < 2) continue;
+        for (var li = 0; li < liste.length; li++) {
+          // Nachbarblöcke ähneln sich naturgemäß - nur räumlich getrennte zählen
+          var bA = blocks[liste[li]];
+          var fern = false;
+          for (var lj = 0; lj < liste.length; lj++) {
+            if (li === lj) continue;
+            var bB = blocks[liste[lj]];
+            if (Math.abs(bA.bx - bB.bx) + Math.abs(bA.by - bB.by) > 3) { fern = true; break; }
+          }
+          if (fern && !verdaechtig[liste[li]]) { verdaechtig[liste[li]] = true; anzahl++; }
+        }
+      }
+
+      // Ergebnisbild: Original abgedunkelt, verdächtige Blöcke eingefärbt
+      var out = new Uint8ClampedArray(W * H * 4);
+      for (var i2 = 0; i2 < d.length; i2 += 4) {
+        out[i2] = d[i2] * 0.35; out[i2 + 1] = d[i2 + 1] * 0.35;
+        out[i2 + 2] = d[i2 + 2] * 0.35; out[i2 + 3] = 255;
+      }
+      for (var idx in verdaechtig) {
+        var bb = blocks[idx]; if (!bb) continue;
+        for (var ty = 0; ty < bs; ty++) {
+          for (var tx = 0; tx < bs; tx++) {
+            var q2 = ((bb.by * bs + ty) * W + (bb.bx * bs + tx)) * 4;
+            out[q2] = 255; out[q2 + 1] = Math.min(255, out[q2 + 1] + 60); out[q2 + 2] = out[q2 + 2];
+          }
+        }
+      }
+
+      return {
+        imageData: new ImageData(out, W, H),
+        suspectBlocks: anzahl,
+        blockSize: bs,
+        scaled: s.scaled,
+        error: null
+      };
+    } catch (e) {
+      leer.error = 'Die Copy-Move-Prüfung ist fehlgeschlagen.';
+      return leer;
+    }
+  }
+
+  /* =========================================================================
+   * 10. Gesamtbericht
+   * ========================================================================= */
+
+  async function report(fileOrBlob, opts) {
+    opts = opts || {};
+    var erg = {
+      erzeugtAm: new Date().toISOString(),
+      version: VERSION,
+      dateiname: (fileOrBlob && fileOrBlob.name) || null,
+      mimeType: (fileOrBlob && fileOrBlob.type) || null,
+      hash: null, metadaten: null,
+      ela: null, histogramm: null, rauschen: null, copyMove: null,
+      fehler: []
+    };
+    try {
+      reportProgress(opts.onProgress, 'hash', 0.05);
+      erg.hash = await hash(fileOrBlob);
+
+      reportProgress(opts.onProgress, 'metadaten', 0.2);
+      erg.metadaten = await readMetadata(fileOrBlob);
+
+      var bmp = null;
+      try { bmp = await createImageBitmap(fileOrBlob); }
+      catch (e) { erg.fehler.push('Das Bild konnte nicht dekodiert werden - Pixelanalysen entfallen.'); }
+
+      if (bmp) {
+        erg.breite = bmp.width; erg.hoehe = bmp.height;
+
+        reportProgress(opts.onProgress, 'ela', 0.4);
+        erg.ela = await errorLevelAnalysis(bmp, opts.ela);
+        if (erg.ela && erg.ela.error) erg.fehler.push(erg.ela.error);
+
+        reportProgress(opts.onProgress, 'histogramm', 0.6);
+        var pix = drawToImageData(bmp, Math.min(bmp.width, 1200),
+                                  Math.round(Math.min(bmp.width, 1200) / bmp.width * bmp.height));
+        erg.histogramm = pix ? histogram(pix) : null;
+
+        reportProgress(opts.onProgress, 'rauschen', 0.75);
+        erg.rauschen = await noiseResidual(bmp);
+        if (erg.rauschen && erg.rauschen.error) erg.fehler.push(erg.rauschen.error);
+
+        reportProgress(opts.onProgress, 'copymove', 0.9);
+        erg.copyMove = await copyMoveHint(bmp, opts.copyMove);
+        if (erg.copyMove && erg.copyMove.error) erg.fehler.push(erg.copyMove.error);
+
+        /* Querbezüge, die erst aus mehreren Verfahren entstehen */
+        var f = erg.metadaten.findings;
+        if (erg.ela && !erg.ela.error && erg.ela.meanError > 12) {
+          addFinding(f, 'alarm',
+            'Das Fehlerniveau ist mit einem Mittel von ' + deNum(erg.ela.meanError, 1) +
+            ' ungewöhnlich hoch. In der ELA-Ansicht prüfen, ob einzelne Bereiche deutlich heller ' +
+            'sind als ihre Umgebung.');
+        }
+        if (erg.rauschen && !erg.rauschen.error && erg.rauschen.uniformity < 0.35) {
+          addFinding(f, 'warn',
+            'Das Rauschen ist über das Bild ungleich verteilt. Das kommt bei starker lokaler ' +
+            'Bearbeitung vor, entsteht aber auch durch Weichzeichner, Rauschfilter und hohe ISO-Werte.');
+        }
+        if (erg.copyMove && !erg.copyMove.error && erg.copyMove.suspectBlocks > 6) {
+          addFinding(f, 'warn',
+            erg.copyMove.suspectBlocks + ' Bildblöcke gleichen weit entfernten Blöcken. ' +
+            'Das kann auf Stempeln oder Klonen hindeuten - sich wiederholende Muster wie Fliesen ' +
+            'oder Zäune erzeugen denselben Effekt.');
+        }
+        if (bmp.close) bmp.close();
+      }
+    } catch (e) {
+      erg.fehler.push('Der Bericht konnte nicht vollständig erstellt werden.');
+    }
+    reportProgress(opts.onProgress, 'fertig', 1);
+    return erg;
+  }
+
+  /* =========================================================================
+   * Öffentliche Schnittstelle
+   * ========================================================================= */
+
+  root.Forensics = {
+    version: VERSION,
+    hash: hash,
+    readMetadata: readMetadata,
+    errorLevelAnalysis: errorLevelAnalysis,
+    histogram: histogram,
+    noiseResidual: noiseResidual,
+    copyMoveHint: copyMoveHint,
+    report: report,
+    // für Tests in Node
+    _intern: {
+      detectFormat: detectFormat, parseTiffBlock: parseTiffBlock,
+      dmsToDecimal: dmsToDecimal, exifDate: exifDate, formatTag: formatTag,
+      scanJpeg: scanJpeg, scanWebp: scanWebp, sha256Js: sha256Js, sha1Js: sha1Js
+    }
+  };
+
+})(typeof self !== 'undefined' ? self : (typeof globalThis !== 'undefined' ? globalThis : this));

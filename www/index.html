@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="de" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0B1114">
+<title>Forensik Vision</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.5">
+          <circle cx="12" cy="12" r="4.2"/>
+          <path d="M12 3.4v3M12 17.6v3M3.4 12h3M17.6 12h3"/>
+          <path d="M4 8.2V4.6h3.6M20 8.2V4.6h-3.6M4 15.8v3.6h3.6M20 15.8v3.6h-3.6" stroke-width="1.8"/>
+        </svg>
+      </span>
+      <span class="brand-text">
+        <span class="brand-name">Forensik Vision</span>
+        <span class="brand-sub" id="brandSub">wird gestartet …</span>
+      </span>
+    </div>
+    <div class="topbar-actions">
+      <button class="iconbtn" id="themeBtn" type="button" title="Helles/dunkles Thema" aria-label="Thema wechseln">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6">
+          <path d="M20 13.5A8 8 0 1 1 10.5 4a6.5 6.5 0 0 0 9.5 9.5Z"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="boot-notices" id="bootNotices"></div>
+
+  <main class="main">
+    <div class="main-inner">
+
+      <!-- ============================ LIVE ============================ -->
+      <section class="view" id="view-live" data-view="live">
+        <div class="stage stage--live" id="liveStage">
+          <video id="cam" playsinline muted autoplay></video>
+          <canvas id="overlay"></canvas>
+          <div class="stage-veil" id="liveVeil">
+            <p>Die Kamera ist noch nicht gestartet.</p>
+            <button class="btn btn--primary" id="startCamBtn" type="button">Kamera starten</button>
+          </div>
+          <div class="hud" id="liveHud" hidden>
+            <span class="metric"><span class="metric-label">FPS</span><span class="metric-value" id="mFps">–</span></span>
+            <span class="metric"><span class="metric-label">Inferenz</span><span class="metric-value" id="mMs">–</span></span>
+            <span class="metric"><span class="metric-label">Backend</span><span class="metric-value" id="mBackend">–</span></span>
+            <span class="metric"><span class="metric-label">Treffer</span><span class="metric-value" id="mHits">0</span></span>
+          </div>
+        </div>
+
+        <div class="btnrow">
+          <button class="btn btn--ghost btn--sm" id="pauseBtn" type="button" disabled>Pause</button>
+          <button class="btn btn--ghost btn--sm" id="flipBtn" type="button" disabled>Kamera wechseln</button>
+          <button class="btn btn--primary btn--sm" id="grabBtn" type="button" disabled>Bild festhalten</button>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h2 class="panel-title">Schwellenwerte</h2></div>
+          <div class="panel-body panel-body--tight">
+            <div class="sliders">
+              <label class="slider-label">
+                <span class="slider-head">Konfidenz <span class="slider-value" id="confVal">0,25</span></span>
+                <input type="range" id="confRange" min="5" max="95" value="25" step="1">
+                <span class="slider-hint">Wie sicher muss die Erkennung sein, damit sie gezeigt wird.</span>
+              </label>
+              <label class="slider-label">
+                <span class="slider-head">Überlappung (IoU) <span class="slider-value" id="iouVal">0,45</span></span>
+                <input type="range" id="iouRange" min="10" max="90" value="45" step="1">
+                <span class="slider-hint">Ab welcher Überdeckung zwei Rahmen als derselbe Fund gelten.</span>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h2 class="panel-title">Erkannte Objekte</h2>
+            <span class="panel-head-note" id="hitsNote">–</span>
+          </div>
+          <div class="panel-body panel-body--flush">
+            <div class="hits" id="hitsList"><p class="empty">Noch nichts erkannt.</p></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ========================== ANALYSE =========================== -->
+      <section class="view" id="view-analyse" data-view="analyse">
+        <div class="stage stage--analyse" id="analyseStage">
+          <canvas id="analyseCanvas"></canvas>
+          <div class="stage-veil" id="analyseVeil">
+            <p>Kein Bild geladen.</p>
+            <button class="btn btn--primary" id="pickBtn" type="button">Bild auswählen</button>
+            <p class="footnote">Oder im Live-Reiter ein Bild festhalten.</p>
+          </div>
+          <div class="stage-scale" id="analyseScale" hidden></div>
+        </div>
+        <input type="file" id="fileInput" accept="image/*" hidden>
+
+        <div class="seg" id="viewSeg" role="tablist">
+          <button class="btn btn--sm" data-layer="original" type="button" disabled>Original</button>
+          <button class="btn btn--sm" data-layer="ela" type="button" disabled>ELA</button>
+          <button class="btn btn--sm" data-layer="noise" type="button" disabled>Rauschen</button>
+          <button class="btn btn--sm" data-layer="copymove" type="button" disabled>Copy-Move</button>
+        </div>
+        <p class="seg-note" id="segNote"></p>
+
+        <div class="btnrow">
+          <button class="btn btn--ghost btn--sm" id="reanalyseBtn" type="button" disabled>Neu analysieren</button>
+          <button class="btn btn--ghost btn--sm" id="detectStillBtn" type="button" disabled>Objekte erkennen</button>
+          <button class="btn btn--ghost btn--sm" id="otherFileBtn" type="button">Anderes Bild</button>
+        </div>
+
+        <div class="progress" id="analyseProgress" hidden><span class="progress-bar" id="analyseProgressBar"></span></div>
+
+        <div class="panel" id="hashPanel" hidden>
+          <div class="panel-head">
+            <h2 class="panel-title">Integrität</h2>
+            <span class="panel-head-note" id="fileSize"></span>
+          </div>
+          <div class="panel-body">
+            <p class="file-line" id="fileLine"></p>
+            <div class="hashes" id="hashes"></div>
+            <p class="footnote">Die Prüfsummen belegen, dass die untersuchte Datei unverändert ist. Notiere sie, bevor du die Datei weitergibst.</p>
+          </div>
+        </div>
+
+        <div class="panel" id="findingsPanel" hidden>
+          <div class="panel-head"><h2 class="panel-title">Befunde</h2><span class="panel-head-note" id="findingsNote"></span></div>
+          <div class="panel-body panel-body--flush">
+            <div class="findings" id="findingsList"></div>
+          </div>
+          <div class="panel-body panel-body--tight">
+            <p class="footnote">Befunde sind <strong>Hinweise, keine Beweise</strong>. Metadaten lassen sich entfernen und fälschen; gleichmäßige Flächen und wiederkehrende Muster erzeugen Fehlalarme.</p>
+          </div>
+        </div>
+
+        <div class="panel" id="histPanel" hidden>
+          <div class="panel-head"><h2 class="panel-title">Histogramm</h2></div>
+          <div class="panel-body">
+            <div class="hist-wrap"><canvas id="histCanvas" height="150"></canvas></div>
+            <div class="hist-legend" id="histLegend"></div>
+          </div>
+        </div>
+
+        <div class="panel" id="metaPanel" hidden>
+          <div class="panel-head"><h2 class="panel-title">Metadaten</h2><span class="panel-head-note" id="metaNote"></span></div>
+          <div class="panel-body panel-body--flush">
+            <div class="table-wrap"><div class="kv-group" id="metaTable"></div></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- =========================== PROTOKOLL ========================= -->
+      <section class="view" id="view-log" data-view="log">
+        <div class="panel">
+          <div class="panel-head">
+            <h2 class="panel-title">Vorgangsprotokoll</h2>
+            <span class="panel-head-note" id="logCount">0 Einträge</span>
+          </div>
+          <div class="panel-body panel-body--flush">
+            <div class="log-list" id="logList"><p class="empty">Noch keine Vorgänge aufgezeichnet.</p></div>
+          </div>
+          <div class="panel-body panel-body--tight">
+            <div class="btnrow">
+              <button class="btn btn--ghost btn--sm" id="copyLogBtn" type="button">Bericht kopieren</button>
+              <button class="btn btn--ghost btn--sm" id="jsonLogBtn" type="button">Als JSON sichern</button>
+              <button class="btn btn--danger btn--sm" id="clearLogBtn" type="button">Leeren</button>
+            </div>
+            <p class="footnote">Das Protokoll liegt ausschließlich auf diesem Gerät und wird nie übertragen.</p>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <nav class="tabbar" id="tabbar">
+    <button class="tabbtn" data-go="live" type="button" aria-current="true">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="6" width="18" height="13" rx="2.5"/><circle cx="12" cy="12.5" r="3.5"/></svg>
+      <span>Live</span>
+    </button>
+    <button class="tabbtn" data-go="analyse" type="button">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+      <span>Analyse</span>
+    </button>
+    <button class="tabbtn" data-go="log" type="button">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M5 4h14v16H5z"/><path d="M8.5 9h7M8.5 12.5h7M8.5 16h4"/></svg>
+      <span>Protokoll</span>
+    </button>
+  </nav>
+
+</div>
+
+<div class="toast" id="toast" hidden></div>
+
+<!-- ONNX Runtime liegt lokal bei: ein forensisches Werkzeug darf fuer seine
+     Kernfunktion nicht auf eine Internetverbindung angewiesen sein. -->
+<script src="vendor/ort.min.js"></script>
+<script src="js/forensics.js"></script>
+<script src="js/detector.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
