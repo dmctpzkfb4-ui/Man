@@ -24,6 +24,11 @@
 
         </activity>
 
+        <service
+            android:name=".ScreenCaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -40,6 +45,10 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- getUserMedia in der WebView braucht die native Kamera-Berechtigung -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Bildschirmaufnahme: ab Android 14 nur mit laufendem Vordergrunddienst erlaubt -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Kamera ist nicht Pflicht: die Analyse-Funktionen laufen auch ohne -->
     <uses-feature android:name="android.hardware.camera" android:required="false" />

@@ -1320,3 +1320,17 @@ canvas.hist {
 .cmp-verdict[data-level="ok"]   { border-color: var(--ok);   background: var(--ok-soft); }
 .cmp-verdict[data-level="warn"] { border-color: var(--warn); background: var(--warn-soft); }
 .cmp-verdict[data-level="crit"] { border-color: var(--crit); background: var(--crit-soft); }
+
+/* Bildschirmquelle: eigene Leinwand, liegt an derselben Stelle wie das Video. */
+.stage--live #screenView {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: var(--stage);
+  display: none;
+}
+.stage--live.quelle-bildschirm #screenView { display: block; }
+.stage--live.quelle-bildschirm video { display: none; }
+#sourceSeg { margin-bottom: 4px; }

@@ -41,12 +41,19 @@
 
       <!-- ============================ LIVE ============================ -->
       <section class="view" id="view-live" data-view="live">
+        <div class="seg" id="sourceSeg" role="tablist">
+          <button class="btn btn--sm is-active" data-src="kamera" type="button">Kamera</button>
+          <button class="btn btn--sm" data-src="bildschirm" type="button">Bildschirm</button>
+        </div>
+
         <div class="stage stage--live" id="liveStage">
           <video id="cam" playsinline muted autoplay></video>
+          <canvas id="screenView"></canvas>
           <canvas id="overlay"></canvas>
           <div class="stage-veil" id="liveVeil">
-            <p>Die Kamera ist noch nicht gestartet.</p>
+            <p id="veilText">Die Kamera ist noch nicht gestartet.</p>
             <button class="btn btn--primary" id="startCamBtn" type="button">Kamera starten</button>
+            <p class="footnote" id="veilNote"></p>
           </div>
           <div class="hud" id="liveHud" hidden>
             <span class="metric"><span class="metric-label">FPS</span><span class="metric-value" id="mFps">–</span></span>
@@ -59,6 +66,7 @@
         <div class="btnrow">
           <button class="btn btn--ghost btn--sm" id="pauseBtn" type="button" disabled>Pause</button>
           <button class="btn btn--ghost btn--sm" id="flipBtn" type="button" disabled>Kamera wechseln</button>
+          <button class="btn btn--ghost btn--sm" id="stopSrcBtn" type="button" disabled>Beenden</button>
           <button class="btn btn--primary btn--sm" id="grabBtn" type="button" disabled>Bild festhalten</button>
         </div>
 

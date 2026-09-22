@@ -24,6 +24,9 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        // Eigene Plugins muessen VOR super.onCreate() angemeldet werden,
+        // sonst kennt die Bruecke sie beim Aufbau der WebView noch nicht.
+        registerPlugin(ScreenCapturePlugin.class);
         super.onCreate(savedInstanceState);
 
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);

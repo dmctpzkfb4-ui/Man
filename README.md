@@ -9,7 +9,7 @@ bei forensischer Arbeit keine Bequemlichkeit, sondern Voraussetzung.
 
 ## Funktionen
 
-**Live** — Objekterkennung über die Kamera mit YOLO26n (80 COCO-Klassen),
+**Live** — Objekterkennung über **Kamera oder Bildschirm** mit YOLO26n (80 COCO-Klassen),
 Rahmen als Überlagerung, FPS/Inferenzzeit/Backend sichtbar, Schwellenwerte
 für Konfidenz und Überlappung einstellbar, Einzelbild festhalten.
 
@@ -76,6 +76,29 @@ Stufe als der Rest, hatte er eine andere Kompressionsvorgeschichte.
 
 Braucht rund 25 Neukodierungen und läuft deshalb auf Anforderung, nicht
 automatisch. Es kommt ohne JPEG-Dekoder aus: nur Kodieren und Subtrahieren.
+
+### Bildschirm als Bildquelle
+
+Zwei Wege, weil es keinen gemeinsamen gibt:
+
+Im Browser liefert `getDisplayMedia` einen Strom wie eine Kamera. **Android
+WebView kennt `getDisplayMedia` nicht** — dort holt ein eigenes Capacitor-Plugin
+über `MediaProjection` Einzelbilder als JPEG. Beide Wege enden in derselben
+Erkennungsschleife; der Unterschied steckt allein in `holeBild()`.
+
+Ab Android 14 verweigert das System `MediaProjection`, wenn nicht *vorher* ein
+Vordergrunddienst mit dem Typ `mediaProjection` läuft, und
+`registerCallback()` muss vor dem `VirtualDisplay` stehen. Beides ist im
+Plugin in genau dieser Reihenfolge umgesetzt.
+
+Die Aufnahme braucht die Zustimmung im Systemdialog, und solange sie läuft,
+bleibt eine Benachrichtigung sichtbar. Das ist so gewollt und wird nicht
+umgangen. Die Bilder verlassen das Gerät nicht — sie gehen direkt in die
+Erkennung und werden danach verworfen.
+
+Aufgenommen wird auf 720 px Breite begrenzt: die Erkennung arbeitet ohnehin
+auf 320 bzw. 640 Pixeln, eine volle Bildschirmauflösung je Bild zu übertragen
+wäre reine Verschwendung.
 
 ## Bauen
 

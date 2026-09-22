@@ -15,6 +15,8 @@
     labels: [], meta: null,
     detectorReady: false, detectorMode: null,
     stream: null, facing: 'environment', running: false, busy: false,
+    quelle: 'kamera', srcW: 0, srcH: 0,
+    schirmAktiv: false, schirmNativ: false, schirmBitmap: null,
     conf: 0.25, iou: 0.45,
     fpsWindow: [], lastHits: [],
     bild: null, bitmap: null, layers: {}, layer: 'original',
@@ -137,6 +139,10 @@
   /* ============================================================== Kamera */
 
   async function startKamera() {
+    S.quelle = 'kamera';
+    S.schirmNativ = false;
+    $('liveStage').classList.remove('quelle-bildschirm');
+    markiereQuelle();
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       toast('Diese Umgebung stellt keine Kamera bereit.');
       return;
@@ -158,11 +164,13 @@
     var v = $('cam');
     v.srcObject = S.stream;
     await v.play().catch(function () {});
+    S.srcW = v.videoWidth; S.srcH = v.videoHeight;
     $('liveVeil').hidden = true;
     $('liveHud').hidden = false;
     $('pauseBtn').disabled = false;
     $('flipBtn').disabled = false;
     $('grabBtn').disabled = false;
+    $('stopSrcBtn').disabled = false;
     S.running = true;
     log('kamera', 'Kamera gestartet', v.videoWidth + '×' + v.videoHeight + ' · ' +
       (S.facing === 'environment' ? 'Rückkamera' : 'Frontkamera'));
@@ -179,19 +187,26 @@
    * also beschnitten - ohne diese Umrechnung säßen alle Rahmen versetzt.
    */
   function zeichne(hits) {
-    var v = $('cam'), c = $('overlay');
+    var c = $('overlay');
     var bw = c.clientWidth, bh = c.clientHeight;
-    if (!bw || !bh || !v.videoWidth) return;
+    // Quellmasse kommen aus dem Zustand, nicht mehr fest vom Videoelement -
+    // die Bildschirmquelle liefert gar kein Video.
+    var sw = S.srcW, sh = S.srcH;
+    if (!bw || !bh || !sw || !sh) return;
     var dpr = Math.min(window.devicePixelRatio || 1, 2);
     if (c.width !== Math.round(bw * dpr)) { c.width = Math.round(bw * dpr); c.height = Math.round(bh * dpr); }
     var g = c.getContext('2d');
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, bw, bh);
 
-    var s = Math.max(bw / v.videoWidth, bh / v.videoHeight);   // cover
-    var offX = (bw - v.videoWidth * s) / 2;
-    var offY = (bh - v.videoHeight * s) / 2;
-    var spiegel = S.facing === 'user';
+    // Kamera wird formatfuellend beschnitten (cover), der Bildschirm dagegen
+    // vollstaendig eingepasst (contain) - sonst fehlen die Bildschirmraender.
+    var s = S.quelle === 'bildschirm'
+      ? Math.min(bw / sw, bh / sh)
+      : Math.max(bw / sw, bh / sh);
+    var offX = (bw - sw * s) / 2;
+    var offY = (bh - sh * s) / 2;
+    var spiegel = S.quelle === 'kamera' && S.facing === 'user';
 
     g.lineWidth = 2;
     g.font = '600 12px ui-monospace, monospace';
@@ -250,12 +265,14 @@
 
   async function schleife() {
     if (!S.running) return;
-    var v = $('cam');
-    if (S.detectorReady && !S.busy && v.readyState >= 2) {
+    if (S.detectorReady && !S.busy) {
       S.busy = true;
       var t0 = performance.now();
       try {
-        var roh = await window.Detector.detect(v, { conf: S.conf, iou: S.iou, maxDet: 60 });
+        var quelle = await holeBild();
+        if (!quelle) { S.busy = false; requestAnimationFrame(schleife); return; }
+        if (S.quelle === 'bildschirm' && S.schirmNativ) zeigeSchirmbild(quelle);
+        var roh = await window.Detector.detect(quelle, { conf: S.conf, iou: S.iou, maxDet: 60 });
         var hits = filtere(roh);
         S.lastHits = hits;
         zeichne(hits);
@@ -274,6 +291,150 @@
       S.busy = false;
     }
     requestAnimationFrame(schleife);
+  }
+
+  /* ================================================== Bildschirm als Quelle
+   *
+   * Zwei Wege, weil es keinen gemeinsamen gibt:
+   *   - Im Browser liefert getDisplayMedia einen Strom wie eine Kamera.
+   *   - Android WebView kennt getDisplayMedia NICHT. Dort holt das native
+   *     Plugin (MediaProjection) Einzelbilder als JPEG.
+   *
+   * Beide Wege enden in derselben Schleife; der Unterschied steckt allein
+   * in holeBild().
+   * ====================================================================== */
+
+  function schirmPlugin() {
+    var P = window.Capacitor && window.Capacitor.Plugins;
+    return P && P.ScreenCapture ? P.ScreenCapture : null;
+  }
+
+  async function starteBildschirm() {
+    stoppeQuelle();
+    S.quelle = 'bildschirm';
+    markiereQuelle();
+
+    var p = schirmPlugin();
+    if (p) {
+      /* --- Android: natives Plugin --- */
+      try {
+        var r = await p.start({ maxWidth: 720, quality: 72 });
+        S.srcW = r.width; S.srcH = r.height;
+        S.schirmNativ = true;
+        S.schirmAktiv = true;
+        $('liveStage').classList.add('quelle-bildschirm');
+        // Wird die Aufnahme über die Systemleiste beendet, muss die App das merken.
+        p.removeAllListeners && p.removeAllListeners();
+        p.addListener('screenCaptureStopped', function () {
+          toast('Die Bildschirmaufnahme wurde beendet.');
+          stoppeQuelle();
+        });
+        log('quelle', 'Bildschirmaufnahme gestartet', r.width + '×' + r.height + ' · nativ (MediaProjection)');
+      } catch (err) {
+        S.quelle = 'kamera'; markiereQuelle();
+        var t = String(err && err.message || err);
+        toast(/abgelehnt|denied|cancel/i.test(t)
+          ? 'Die Bildschirmaufnahme wurde abgelehnt.'
+          : 'Bildschirmaufnahme nicht möglich: ' + t, 5000);
+        log('fehler', 'Bildschirmaufnahme fehlgeschlagen', t);
+        return;
+      }
+    } else if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
+      /* --- Browser --- */
+      try {
+        S.stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+      } catch (err) {
+        S.quelle = 'kamera'; markiereQuelle();
+        toast('Bildschirmfreigabe abgelehnt oder nicht möglich.', 4000);
+        return;
+      }
+      var v = $('cam');
+      v.srcObject = S.stream;
+      await v.play().catch(function () {});
+      S.srcW = v.videoWidth; S.srcH = v.videoHeight;
+      S.schirmNativ = false;
+      S.schirmAktiv = true;
+      // Beendet die Person die Freigabe im Browser, endet auch die Schleife.
+      S.stream.getVideoTracks().forEach(function (t2) {
+        t2.addEventListener('ended', function () { toast('Bildschirmfreigabe beendet.'); stoppeQuelle(); });
+      });
+      log('quelle', 'Bildschirmfreigabe gestartet', S.srcW + '×' + S.srcH + ' · getDisplayMedia');
+    } else {
+      S.quelle = 'kamera'; markiereQuelle();
+      toast('Diese Umgebung bietet keine Bildschirmaufnahme an.', 5000);
+      return;
+    }
+
+    $('liveVeil').hidden = true;
+    $('liveHud').hidden = false;
+    $('pauseBtn').disabled = false;
+    $('grabBtn').disabled = false;
+    $('stopSrcBtn').disabled = false;
+    $('flipBtn').disabled = true;
+    S.running = true;
+    schleife();
+  }
+
+  /** Holt ein Einzelbild vom nativen Plugin und macht ein ImageBitmap daraus. */
+  async function nativesBild() {
+    var p = schirmPlugin();
+    if (!p) return null;
+    var r = await p.grabFrame({ quality: 72 });
+    if (!r || !r.frame) return null;                 // noch kein neues Bild
+    var antwort = await fetch('data:image/jpeg;base64,' + r.frame);
+    var blob = await antwort.blob();
+    var bmp = await createImageBitmap(blob);
+    // Vorheriges Bild freigeben, sonst wächst der Speicher mit jedem Frame.
+    if (S.schirmBitmap && S.schirmBitmap.close) S.schirmBitmap.close();
+    S.schirmBitmap = bmp;
+    S.srcW = bmp.width; S.srcH = bmp.height;
+    return bmp;
+  }
+
+  /** Liefert die aktuelle Bildquelle für Erkennung und Anzeige. */
+  async function holeBild() {
+    if (S.quelle === 'bildschirm' && S.schirmNativ) return await nativesBild();
+    var v = $('cam');
+    if (v.readyState < 2 || !v.videoWidth) return null;
+    S.srcW = v.videoWidth; S.srcH = v.videoHeight;
+    return v;
+  }
+
+  /** Zeigt ein nativ geholtes Bild an - das Videoelement bleibt hier leer. */
+  function zeigeSchirmbild(bmp) {
+    var c = $('screenView');
+    if (c.width !== bmp.width) { c.width = bmp.width; c.height = bmp.height; }
+    c.getContext('2d').drawImage(bmp, 0, 0);
+  }
+
+  function markiereQuelle() {
+    document.querySelectorAll('#sourceSeg button').forEach(function (b) {
+      b.classList.toggle('is-active', b.dataset.src === S.quelle);
+    });
+    var kamera = S.quelle === 'kamera';
+    $('veilText').textContent = kamera
+      ? 'Die Kamera ist noch nicht gestartet.'
+      : 'Die Bildschirmaufnahme ist noch nicht gestartet.';
+    $('startCamBtn').textContent = kamera ? 'Kamera starten' : 'Bildschirm aufnehmen';
+    $('veilNote').textContent = kamera
+      ? ''
+      : 'Android fragt vorher um Zustimmung. Während der Aufnahme bleibt eine Benachrichtigung sichtbar.';
+  }
+
+  function stoppeQuelle() {
+    S.running = false;
+    S.schirmAktiv = false;
+    if (S.stream) { S.stream.getTracks().forEach(function (t) { t.stop(); }); S.stream = null; }
+    var p = schirmPlugin();
+    if (p && S.schirmNativ) { try { p.stop(); } catch (e) {} }
+    if (S.schirmBitmap && S.schirmBitmap.close) { S.schirmBitmap.close(); S.schirmBitmap = null; }
+    S.schirmNativ = false;
+    $('liveStage').classList.remove('quelle-bildschirm');
+    $('liveVeil').hidden = false;
+    $('liveHud').hidden = true;
+    ['pauseBtn', 'flipBtn', 'grabBtn', 'stopSrcBtn'].forEach(function (id) { $(id).disabled = true; });
+    var o = $('overlay').getContext('2d');
+    o.clearRect(0, 0, $('overlay').width, $('overlay').height);
   }
 
   /* ============================================================ Analyse */
@@ -946,7 +1107,21 @@
       if (gespeichert) document.documentElement.setAttribute('data-theme', gespeichert);
     } catch (e) {}
 
-    $('startCamBtn').addEventListener('click', startKamera);
+    $('startCamBtn').addEventListener('click', function () {
+      if (S.quelle === 'bildschirm') starteBildschirm(); else startKamera();
+    });
+    $('stopSrcBtn').addEventListener('click', function () {
+      stoppeQuelle();
+      log('quelle', 'Quelle beendet', S.quelle === 'bildschirm' ? 'Bildschirm' : 'Kamera');
+    });
+    document.querySelectorAll('#sourceSeg button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        if (S.quelle === b.dataset.src) return;
+        stoppeQuelle();
+        S.quelle = b.dataset.src;
+        markiereQuelle();
+      });
+    });
     $('pauseBtn').addEventListener('click', function () {
       S.running = !S.running;
       this.textContent = S.running ? 'Pause' : 'Weiter';
@@ -957,14 +1132,14 @@
       startKamera();
     });
     $('grabBtn').addEventListener('click', function () {
-      var v = $('cam');
-      if (!v.videoWidth) return;
+      var quelle = (S.quelle === 'bildschirm' && S.schirmNativ) ? S.schirmBitmap : $('cam');
+      if (!quelle || !S.srcW || !S.srcH) return;
       var c = document.createElement('canvas');
-      c.width = v.videoWidth; c.height = v.videoHeight;
-      c.getContext('2d').drawImage(v, 0, 0);
+      c.width = S.srcW; c.height = S.srcH;
+      c.getContext('2d').drawImage(quelle, 0, 0);
       c.toBlob(function (b) {
         if (!b) return;
-        b.name = 'Kamerabild.jpg';
+        b.name = S.quelle === 'bildschirm' ? 'Bildschirmaufnahme.jpg' : 'Kamerabild.jpg';
         go('analyse'); analysiere(b);
       }, 'image/jpeg', 0.95);
     });
@@ -1046,6 +1221,7 @@
     verdrahte();
     go('live');
     renderLog();
+    markiereQuelle();
     $('confVal').textContent = num(S.conf, 2);
     $('iouVal').textContent = num(S.iou, 2);
 
